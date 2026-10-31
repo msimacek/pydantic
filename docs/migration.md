@@ -1,6 +1,10 @@
 ---
-description: Migrating from Pydantic V1.
+description: Migrating from Pydantic V1 to Pydantic V2.
 ---
+
+!!! warning
+    This guide covers the migration from Pydantic V1 to Pydantic V2, and is kept for reference.
+    It does not cover the changes introduced in later major versions.
 
 Pydantic V2 introduces a number of changes to the API, including some breaking changes.
 
@@ -48,6 +52,9 @@ See more about it on the [Bump Pydantic](https://github.com/pydantic/bump-pydant
 
 ## Continue using Pydantic V1 features
 
+!!! note
+    The `pydantic.v1` namespace described in this section was removed in Pydantic V3.
+
 Pydantic V1 is still available when you need it, though we recommend migrating to
 Pydantic V2 for its improvements and new features.
 
@@ -73,7 +80,7 @@ You can also import functions that have been removed from Pydantic V2, such as `
 from pydantic.v1.utils import lenient_isinstance
 ```
 
-Pydantic V1 documentation is available at [https://docs.pydantic.dev/1.10/](https://docs.pydantic.dev/1.10/).
+See the [Pydantic V1 documentation](https://pydantic.dev/docs/validation/1.10/overview/).
 
 ### Using Pydantic v1 features in a v1/v2 environment
 
@@ -188,18 +195,16 @@ If you'd still like to use said arguments, you can use [this workaround](https:/
 * JSON serialization of non-string key values is generally done with `str(key)`, leading to some changes in behavior such as the following:
 
 ```python {test="skip"}
-from typing import Optional
-
 from pydantic import BaseModel as V2BaseModel
 from pydantic.v1 import BaseModel as V1BaseModel
 
 
 class V1Model(V1BaseModel):
-    a: dict[Optional[str], int]
+    a: dict[str | None, int]
 
 
 class V2Model(V2BaseModel):
-    a: dict[Optional[str], int]
+    a: dict[str | None, int]
 
 
 v1_model = V1Model(a={None: 123})
@@ -328,7 +333,7 @@ like `class MyModel(Model1, Model2)`, the non-default settings in the `model_con
 will be merged, and for any settings defined in both, those from `Model2` will override those from `Model1`.
 
 * The following config settings have been removed:
-    * `allow_mutation` — this has been removed. You should be able to use [frozen](api/config.md#pydantic.config.ConfigDict) equivalently (inverse of current use).
+    * `allow_mutation` — this has been removed. You should be able to use [`frozen`](api/config.md#pydantic.config.ConfigDict.frozen) equivalently (inverse of current use).
     * `error_msg_templates`
     * `fields` — this was the source of various bugs, so has been removed.
       You should be able to use `Annotated` on fields to modify them as desired.
@@ -624,13 +629,11 @@ input whenever possible, even if the correct type is not the first choice for wh
 As a demonstration, consider the following example:
 
 ```python
-from typing import Union
-
 from pydantic import BaseModel
 
 
 class Model(BaseModel):
-    x: Union[int, str]
+    x: int | str
 
 
 print(Model(x='1'))
@@ -670,7 +673,7 @@ The following table describes the behavior of field annotations in V2:
 
 Here is a code example demonstrating the above:
 
-```python
+```python {lint="skip"}
 from typing import Optional
 
 from pydantic import BaseModel, ValidationError

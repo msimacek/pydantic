@@ -92,8 +92,9 @@ nav:
       - Welcome to Pydantic: index.md
       - Why use Pydantic: why.md
       - Help with Pydantic: help_with_pydantic.md
+      - Enterprise Support: enterprise-support.md
       - Installation: install.md
-      - Migration Guide: migration.md
+      - Migration Guide (V1 to V2): migration.md
       - Version Policy: version-policy.md
       - Contributing: contributing.md
       - Changelog: changelog.md
@@ -167,16 +168,18 @@ nav:
       - Databases: examples/orms.md
       - Custom Validators: examples/custom_validators.md
       - Dynamic models: examples/dynamic_models.md
+      - Cyclic references: examples/cyclic_references.md
       - Agent libraries – Pydantic AI: examples/pydantic_ai.md
   - Error Messages:
       - Error Handling: errors/errors.md
       - Validation Errors: errors/validation_errors.md
       - Usage Errors: errors/usage_errors.md
+      - Troubleshooting with Logfire: errors/troubleshooting.md
   - Integrations:
       - Pydantic Logfire: integrations/logfire.md
       - LLMs: integrations/llms.md
       - Dev Tools:
-          - Mypy: integrations/mypy.md/.
+          - Mypy: integrations/mypy.md
           - Pyrefly: integrations/pyrefly.md
           - PyCharm: integrations/pycharm.md
           - Hypothesis: integrations/hypothesis.md
@@ -219,7 +222,6 @@ hooks:
   - 'docs/plugins/algolia.py'
 
 plugins:
-  - social
   - mike:
       alias_type: symlink
       canonical_version: latest
@@ -230,7 +232,7 @@ plugins:
       markdown_description: |-
         Pydantic is the most widely used data validation library for Python.
         Fast and extensible, Pydantic plays nicely with your linters/IDE/brain.
-        Define how data should be in pure, canonical Python 3.9+; validate it with Pydantic.
+        Define how data should be in pure, canonical Python 3.10+; validate it with Pydantic.
       sections:
         Concepts documentation:
           - concepts/*.md

@@ -2,7 +2,6 @@
 
 from __future__ import annotations as _annotations
 
-import re
 from typing import Any, ClassVar, Literal
 
 from typing_extensions import Self
@@ -10,13 +9,11 @@ from typing_inspection.introspection import Qualifier
 
 from pydantic._internal import _repr
 
-from ._migration import getattr_migration
 from .version import version_short
 
 __all__ = (
     'PydanticUserError',
     'PydanticUndefinedAnnotation',
-    'PydanticImportError',
     'PydanticSchemaGenerationError',
     'PydanticInvalidForJsonSchema',
     'PydanticForbiddenQualifier',
@@ -29,7 +26,6 @@ __all__ = (
 DEV_ERROR_DOCS_URL = f'https://errors.pydantic.dev/{version_short()}/u/'
 PydanticErrorCodes = Literal[
     'class-not-fully-defined',
-    'custom-json-schema',
     'decorator-invalid-fields',
     'decorator-missing-arguments',
     'decorator-missing-field',
@@ -42,22 +38,18 @@ PydanticErrorCodes = Literal[
     'typed-dict-version',
     'model-field-overridden',
     'model-field-missing-annotation',
-    'config-both',
-    'removed-kwargs',
     'circular-reference-schema',
     'invalid-for-json-schema',
     'json-schema-already-used',
     'base-model-instantiated',
     'undefined-annotation',
     'schema-for-unknown-type',
-    'import-error',
     'create-model-field-definitions',
+    'create-model-namespace',
     'validator-instance-method',
+    'model-after-validator-classmethod',
     'validator-input-type',
-    'root-validator-pre-skip',
     'model-serializer-instance-method',
-    'validator-field-config-info',
-    'validator-v1-signature',
     'validator-signature',
     'field-serializer-signature',
     'model-serializer-signature',
@@ -106,11 +98,11 @@ class PydanticUndefinedAnnotation(PydanticErrorMixin, NameError):
     """A subclass of `NameError` raised when handling undefined annotations during `CoreSchema` generation.
 
     Attributes:
-        name: Name of the error.
+        name: Name of the error, of `None` if not available.
         message: Description of the error.
     """
 
-    def __init__(self, name: str, message: str) -> None:
+    def __init__(self, name: str | None, message: str) -> None:
         self.name = name
         super().__init__(message=message, code='undefined-annotation')
 
@@ -124,22 +116,7 @@ class PydanticUndefinedAnnotation(PydanticErrorMixin, NameError):
         Returns:
             Converted `PydanticUndefinedAnnotation` error.
         """
-        try:
-            name = name_error.name  # type: ignore  # python > 3.10
-        except AttributeError:
-            name = re.search(r".*'(.+?)'", str(name_error)).group(1)  # type: ignore[union-attr]
-        return cls(name=name, message=str(name_error))
-
-
-class PydanticImportError(PydanticErrorMixin, ImportError):
-    """An error raised when an import fails due to module changes between V1 and V2.
-
-    Attributes:
-        message: Description of the error.
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code='import-error')
+        return cls(name=name_error.name, message=str(name_error))
 
 
 class PydanticSchemaGenerationError(PydanticUserError):
@@ -184,6 +161,3 @@ class PydanticForbiddenQualifier(PydanticUserError):
             ),
             code=None,
         )
-
-
-__getattr__ = getattr_migration(__name__)

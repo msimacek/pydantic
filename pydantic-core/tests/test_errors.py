@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 from dirty_equals import HasRepr, IsInstance, IsJson, IsStr
@@ -94,10 +94,10 @@ def test_pydantic_value_error_invalid_dict():
 
     assert str(exc_info.value) == (
         '1 validation error for function-plain[my_function()]\n'
-        "  (error rendering message: TypeError: 'tuple' object cannot be cast as 'str') "
+        "  (error rendering message: TypeError: 'tuple' object is not an instance of 'str') "
         '[type=my_error, input_value=42, input_type=int]'
     )
-    with pytest.raises(TypeError, match="'tuple' object cannot be cast as 'str'"):
+    with pytest.raises(TypeError, match="'tuple' object is not an instance of 'str'"):
         exc_info.value.errors(include_url=False)
 
 
@@ -107,7 +107,7 @@ def test_pydantic_value_error_invalid_type():
 
     v = SchemaValidator(core_schema.with_info_plain_validator_function(f))
 
-    with pytest.raises(TypeError, match="argument 'context': 'list' object cannot be cast as 'dict'"):
+    with pytest.raises(TypeError, match="'list' object is not an instance of 'dict'"):
         v.validate_python(42)
 
 
@@ -201,7 +201,7 @@ def test_pydantic_error_type_raise_ctx(extra: dict):
 
 
 @pytest.mark.parametrize('ctx', [None, {}])
-def test_pydantic_error_type_raise_custom_no_ctx(ctx: Optional[dict]):
+def test_pydantic_error_type_raise_custom_no_ctx(ctx: dict | None):
     def f(input_value, info):
         raise PydanticKnownError('int_type', ctx)
 
@@ -237,7 +237,7 @@ def test_pydantic_custom_error_type_raise_custom_ctx(extra: dict):
 
 
 @pytest.mark.parametrize('ctx', [None, {}])
-def test_pydantic_custom_error_type_raise_custom_no_ctx(ctx: Optional[dict]):
+def test_pydantic_custom_error_type_raise_custom_no_ctx(ctx: dict | None):
     def f(input_value, info):
         raise PydanticCustomError('my_error', 'my message', ctx)
 
@@ -267,6 +267,11 @@ all_errors = [
     ('model_attributes_type', 'Input should be a valid dictionary or object to extract fields from', None),
     ('dataclass_exact_type', 'Input should be an instance of Foobar', {'class_name': 'Foobar'}),
     ('dataclass_type', 'Input should be a dictionary or an instance of Foobar', {'class_name': 'Foobar'}),
+    (
+        'named_tuple_type',
+        'Input should be a tuple, list, dictionary or an instance of Foobar',
+        {'class_name': 'Foobar'},
+    ),
     (
         'default_factory_not_called',
         'The default factory uses validated data, but at least one validation error occurred',
@@ -298,18 +303,22 @@ all_errors = [
         {'field_type': 'Foobar', 'max_length': 42, 'actual_length': 50},
     ),
     ('string_type', 'Input should be a valid string', None),
-    ('string_sub_type', 'Input should be a string, not an instance of a subclass of str', None),
     ('string_unicode', 'Input should be a valid string, unable to parse raw data as a unicode string', None),
     ('string_pattern_mismatch', "String should match pattern 'foo'", {'pattern': 'foo'}),
+    ('string_not_ascii', 'String should contain only ASCII characters', None),
     ('string_too_short', 'String should have at least 42 characters', {'min_length': 42}),
     ('string_too_short', 'String should have at least 1 character', {'min_length': 1}),
     ('string_too_long', 'String should have at most 42 characters', {'max_length': 42}),
     ('string_too_long', 'String should have at most 1 character', {'max_length': 1}),
     ('dict_type', 'Input should be a valid dictionary', None),
+    ('frozen_dict_type', 'Input should be a valid frozendict', None),
+    ('ordered_dict_type', 'Input should be a valid OrderedDict', None),
+    ('counter_type', 'Input should be a valid Counter', None),
     ('mapping_type', 'Input should be a valid mapping, error: foobar', {'error': 'foobar'}),
     ('iterable_type', 'Input should be iterable', None),
     ('iteration_error', 'Error iterating over object, error: foobar', {'error': 'foobar'}),
     ('list_type', 'Input should be a valid list', None),
+    ('deque_type', 'Input should be a valid deque', None),
     ('tuple_type', 'Input should be a valid tuple', None),
     ('set_item_not_hashable', 'Set items should be hashable', None),
     ('set_type', 'Input should be a valid set', None),
@@ -346,6 +355,7 @@ all_errors = [
     ('literal_error', 'Input should be foo', {'expected': 'foo'}),
     ('literal_error', 'Input should be foo or bar', {'expected': 'foo or bar'}),
     ('missing_sentinel_error', "Input should be the 'MISSING' sentinel", None),
+    ('ellipsis_error', "Input should be the 'Ellipsis' literal", None),
     ('date_type', 'Input should be a valid date', None),
     ('date_parsing', 'Input should be a valid date in the format YYYY-MM-DD, foobar', {'error': 'foobar'}),
     ('date_from_datetime_parsing', 'Input should be a valid date or datetime, foobar', {'error': 'foobar'}),
@@ -393,6 +403,8 @@ all_errors = [
     ('uuid_version', 'UUID version 42 expected', {'expected_version': 42}),
     ('decimal_type', 'Decimal input should be an integer, float, string or Decimal object', None),
     ('decimal_parsing', 'Input should be a valid decimal', None),
+    ('fraction_type', 'Fraction input should be an integer, float, string or Fraction object', None),
+    ('fraction_parsing', 'Input is not a valid fraction', None),
     ('decimal_max_digits', 'Decimal input should have no more than 42 digits in total', {'max_digits': 42}),
     ('decimal_max_digits', 'Decimal input should have no more than 1 digit in total', {'max_digits': 1}),
     ('decimal_max_places', 'Decimal input should have no more than 42 decimal places', {'decimal_places': 42}),
@@ -539,7 +551,9 @@ def test_all_errors():
     error_types = [e['type'] for e in errors]
     if error_types != list(core_schema.ErrorType.__args__):
         literal = ''.join(f'\n    {e!r},' for e in error_types)
-        print(f'python code (end of python/pydantic_core/core_schema.py):\n\nErrorType = Literal[{literal}\n]')
+        print(
+            f'python code (end of python/pydantic_core/core_schema.py):\n\nErrorType: TypeAlias = Literal[{literal}\n]'
+        )
         pytest.fail('core_schema.ErrorType needs to be updated')
 
 
@@ -1073,7 +1087,7 @@ def test_loc_with_dots(pydantic_version):
         core_schema.typed_dict_schema(
             {
                 'a': core_schema.typed_dict_field(
-                    core_schema.tuple_positional_schema([core_schema.int_schema(), core_schema.int_schema()]),
+                    core_schema.tuple_schema([core_schema.int_schema(), core_schema.int_schema()]),
                     validation_alias='foo.bar',
                 )
             }
@@ -1124,10 +1138,6 @@ def test_hide_input_in_json() -> None:
         assert 'input' not in error
 
 
-@pytest.mark.skipif(
-    sys.version_info < (3, 9) and sys.implementation.name == 'pypy',
-    reason='PyPy before 3.9 cannot pickle this correctly',
-)
 def test_validation_error_pickle() -> None:
     s = SchemaValidator(core_schema.int_schema())
     with pytest.raises(ValidationError) as exc_info:
@@ -1156,9 +1166,6 @@ def test_errors_include_url() -> None:
         ('PYDANTIC_ERRORS_INCLUDE_URL', 'True', True),
         ('PYDANTIC_ERRORS_INCLUDE_URL', 'no', False),
         ('PYDANTIC_ERRORS_INCLUDE_URL', '0', False),
-        # Legacy environment variable, will raise a deprecation warning:
-        ('PYDANTIC_ERRORS_OMIT_URL', '1', False),
-        ('PYDANTIC_ERRORS_OMIT_URL', None, True),
     ],
 )
 def test_errors_include_url_envvar(env_var, env_var_value, expected_to_have_url) -> None:
@@ -1172,7 +1179,6 @@ def test_errors_include_url_envvar(env_var, env_var_value, expected_to_have_url)
     env = os.environ.copy()
     # in case the ambient environment has env vars set
     env.pop('PYDANTIC_ERRORS_INCLUDE_URL', None)
-    env.pop('PYDANTIC_ERRORS_OMIT_URL', None)
     if env_var_value is not None:
         env[env_var] = env_var_value
     result = subprocess.run(
@@ -1183,6 +1189,4 @@ def test_errors_include_url_envvar(env_var, env_var_value, expected_to_have_url)
         env=env,
     )
     assert result.returncode == 1
-    if 'PYDANTIC_ERRORS_OMIT_URL' in env:
-        assert 'PYDANTIC_ERRORS_OMIT_URL is deprecated' in result.stdout
     assert ('https://errors.pydantic.dev' in result.stdout) == expected_to_have_url

@@ -6,7 +6,6 @@ use pyo3::PyVisit;
 use pyo3::exceptions::PyKeyError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyDict, PyMapping, PyString};
 
 use crate::PydanticUndefinedType;
@@ -290,13 +289,8 @@ impl<'a, 'py> HashTableSearcher<'a, 'py> {
 }
 
 fn hash_object(value: &Bound<'_, PyAny>) -> PyResult<u64> {
-    let hash_value = cast_unsigned(value.hash()?).try_into()?;
+    let hash_value = value.hash()?.cast_unsigned().try_into()?;
     Ok(hash_value)
-}
-
-// TODO: replace with isize::cast_unsigned on MSRV 1.87
-fn cast_unsigned(x: isize) -> usize {
-    x as usize
 }
 
 impl<T: PyGcTraverse> PyGcTraverse for PyHashTableEntry<T> {
@@ -314,16 +308,8 @@ impl PyGcTraverse for usize {
     }
 }
 
-/// Convert a `PyBackedStr` to a `PyString`.
-///
-/// This is essentially a zero cost conversion (just a reference counting op on `PyBackedStr`).
-///
-/// The difference is that `PyBackedStr` is cheaper for formatting operations (guaranteed to be
-/// UTF8 data accessible as `&str`), whereas `Bound<'py, PyString>` is smaller & cheaper for refcounting
-/// so slightly more efficient to have on the stack etc.
-pub fn pybackedstr_to_pystring<'py>(py: Python<'py>, s: &PyBackedStr) -> Bound<'py, PyString> {
-    let Ok(out) = s.into_pyobject(py);
-    // SAFETY: `PyBackedStr` always returns a `PyString`, TODO PyO3 0.28 will not
-    // need this cast
-    unsafe { out.cast_into_unchecked() }
+pub const ROOT_FIELD: &str = "root";
+
+pub fn root_field_py_str(py: Python<'_>) -> &'_ Bound<'_, PyString> {
+    intern!(py, ROOT_FIELD)
 }

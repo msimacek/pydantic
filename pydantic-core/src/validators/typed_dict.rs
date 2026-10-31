@@ -16,7 +16,6 @@ use crate::input::{Input, ValidatedDict};
 use crate::lookup_key::LookupPathCollection;
 use crate::lookup_key::LookupType;
 use crate::tools::SchemaDict;
-use crate::tools::pybackedstr_to_pystring;
 use ahash::AHashSet;
 use jiter::PartialMode;
 
@@ -177,8 +176,8 @@ impl Validator for TypedDictValidator {
         };
 
         {
-            let state = &mut state.rebind_extra(|extra| extra.data = Some(output_dict.clone()));
-            let state = &mut state.scoped_set(|state| &mut state.has_field_error, false);
+            let state = &mut state.scoped_set_data(Some(output_dict.clone()));
+            let state = &mut state.scoped_clear_field_error();
 
             let mut fields_set_count: usize = 0;
 
@@ -219,8 +218,7 @@ impl Validator for TypedDictValidator {
                     };
 
                     // FIXME: for model and dataclass, `default_value` is called with field name set in extra, does that matter?
-                    let state = &mut state
-                        .rebind_extra(|extra| extra.field_name = Some(pybackedstr_to_pystring(py, &field.name)));
+                    let state = &mut state.scoped_set_field_name(Some(field.name.as_py_str().bind(py).clone()));
 
                     match field.validator.validate(py, value.borrow_input(), state) {
                         Ok(value) => {
@@ -256,6 +254,7 @@ impl Validator for TypedDictValidator {
                     }
                     Ok(None) => {
                         // This means there was no default value
+                        state.has_field_error = true;
                         if field.required {
                             let error_type = ErrorTypeDefaults::Missing;
                             let error_loc = field.lookup_path_collection.error_loc(lookup_type, self.loc_by_alias);
@@ -291,6 +290,7 @@ impl Validator for TypedDictValidator {
                 extra_behavior: ExtraBehavior,
                 partial_last_key: Option<LocItem>,
                 allow_partial: PartialMode,
+                fields: &'a [TypedDictField],
             }
 
             impl<'py, Key, Value> ConsumeIterator<ValResult<(Key, Value)>> for ValidateExtras<'_, '_, 'py>
@@ -300,6 +300,8 @@ impl Validator for TypedDictValidator {
             {
                 type Output = ValResult<()>;
                 fn consume_iterator(self, iterator: impl Iterator<Item = ValResult<(Key, Value)>>) -> ValResult<()> {
+                    // Built lazily, only if an extra key needs to be checked against it
+                    let mut field_names: Option<AHashSet<&str>> = None;
                     for item_result in iterator {
                         let (raw_key, value) = item_result?;
                         let either_str = match raw_key
@@ -335,6 +337,12 @@ impl Validator for TypedDictValidator {
                                 ));
                             }
                             ExtraBehavior::Ignore => {}
+                            // An extra key matching a field name (e.g. when validating by alias) is ignored,
+                            // as it would otherwise override the field in the output dict.
+                            ExtraBehavior::Allow
+                                if field_names
+                                    .get_or_insert_with(|| self.fields.iter().map(|field| &*field.name).collect())
+                                    .contains(cow.as_ref()) => {}
                             ExtraBehavior::Allow => {
                                 let py_key = either_str.as_py_string(self.py, self.state.cache_str());
                                 if let Some(validator) = self.extras_validator {
@@ -377,6 +385,7 @@ impl Validator for TypedDictValidator {
                 extra_behavior,
                 partial_last_key,
                 allow_partial,
+                fields: &self.fields,
             })??;
         }
 

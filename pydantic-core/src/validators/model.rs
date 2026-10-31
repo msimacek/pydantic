@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::pybacked::PyBackedStr;
-use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PySet, PyString, PyTuple, PyType};
 use pyo3::{BoundObject, IntoPyObjectExt, ffi};
 use pyo3::{intern, prelude::*};
@@ -17,10 +16,10 @@ use crate::PydanticUndefinedType;
 use crate::build_tools::py_schema_err;
 use crate::build_tools::schema_or_config_same;
 use crate::errors::{ErrorType, ErrorTypeDefaults, ValError, ValResult};
+use crate::fields_set::FieldsSet;
 use crate::input::{Input, input_as_python_instance, py_error_on_minusone};
-use crate::tools::{SchemaDict, py_err};
+use crate::tools::{ROOT_FIELD, SchemaDict, py_err, root_field_py_str};
 
-const ROOT_FIELD: &str = "root";
 const DUNDER_DICT: &str = "__dict__";
 const DUNDER_FIELDS_SET_KEY: &str = "__pydantic_fields_set__";
 const DUNDER_MODEL_EXTRA_KEY: &str = "__pydantic_extra__";
@@ -123,7 +122,7 @@ impl Validator for ModelValidator {
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
-        if let Some(self_instance) = state.extra().self_instance {
+        if let Some(self_instance) = state.self_instance {
             // in the case that self_instance is Some, we're calling validation from within `BaseModel.__init__`
             return self.validate_init(py, self_instance, input, state);
         }
@@ -157,7 +156,7 @@ impl Validator for ModelValidator {
             if self.revalidate.should_revalidate(py_input, class) || force_revalidate {
                 let fields_set = py_input.getattr(intern!(py, DUNDER_FIELDS_SET_KEY))?;
                 if self.root_model {
-                    let inner_input = py_input.getattr(intern!(py, ROOT_FIELD))?;
+                    let inner_input = py_input.getattr(root_field_py_str(py))?;
                     self.validate_construct(py, &inner_input, Some(&fields_set), state)
                 } else {
                     // get dict here so from_attributes logic doesn't apply
@@ -194,22 +193,22 @@ impl Validator for ModelValidator {
         if self.frozen {
             return Err(ValError::new(ErrorTypeDefaults::FrozenInstance, field_value));
         } else if self.root_model {
-            return if field_name != ROOT_FIELD {
-                Err(ValError::new_with_loc(
+            if field_name != ROOT_FIELD {
+                return Err(ValError::new_with_loc(
                     ErrorType::NoSuchAttribute {
                         attribute: field_name.to_string(),
                         context: None,
                     },
                     field_value,
                     field_name.to_string(),
-                ))
-            } else {
-                let state = &mut state.rebind_extra(|extra| extra.field_name = Some(root_field_py_str(py)));
-                let output = self.validator.validate(py, field_value, state)?;
+                ));
+            }
+            let root_field = root_field_py_str(py);
+            let state = &mut state.scoped_set_field_name(Some(root_field.clone()));
+            let output = self.validator.validate(py, field_value, state)?;
 
-                force_setattr(py, model, intern!(py, ROOT_FIELD), output)?;
-                Ok(model.into_py_any(py)?)
-            };
+            force_setattr(py, model, root_field, output)?;
+            return Ok(model.into_py_any(py)?);
         }
         let old_dict = model.getattr(intern!(py, DUNDER_DICT))?.cast_into::<PyDict>()?;
 
@@ -230,9 +229,9 @@ impl Validator for ModelValidator {
         ) = output.extract(py)?;
 
         if let Ok(fields_set) = model.getattr(intern!(py, DUNDER_FIELDS_SET_KEY)) {
-            let fields_set = fields_set.cast::<PySet>()?;
+            let fields_set: FieldsSet<'_> = fields_set.extract()?;
             for field_name in validated_fields_set {
-                fields_set.add(field_name)?;
+                fields_set.add(&field_name)?;
             }
         }
 
@@ -247,6 +246,29 @@ impl Validator for ModelValidator {
 }
 
 impl ModelValidator {
+    /// Validates against the inner validator, returning the `(dict, extra, fields_set)` components.
+    ///
+    /// Calls `validate_fields()` directly for a bare `ModelFields` validator to avoid a Python tuple
+    /// round trip; other (e.g. wrapped) validators go through `Validator::validate()`.
+    fn validate_inner_fields<'py>(
+        &self,
+        py: Python<'py>,
+        input: &(impl Input<'py> + ?Sized),
+        state: &mut ValidationState<'_, 'py>,
+    ) -> ValResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        if let CombinedValidator::ModelFields(inner) = self.validator.as_ref() {
+            let (model_dict, model_extra, fields_set) = inner.validate_fields(py, input, state)?;
+            Ok((
+                model_dict.into_any(),
+                model_extra.map_or_else(|| py.None().into_bound(py).into_any(), Bound::into_any),
+                Bound::new(py, fields_set)?.into_any(),
+            ))
+        } else {
+            let output = self.validator.validate(py, input, state)?;
+            Ok(output.extract(py)?)
+        }
+    }
+
     /// here we just call the inner validator, then set attributes on `self_instance`
     fn validate_init<'py>(
         &self,
@@ -257,24 +279,22 @@ impl ModelValidator {
     ) -> ValResult<Py<PyAny>> {
         // we need to set `self_instance` to None for nested validators as we don't want to operate on self_instance
         // anymore
-        let state = &mut state.rebind_extra(|extra| extra.self_instance = None);
+        let state = &mut state.scoped_clear_self_instance();
 
         if self.root_model {
-            let state = &mut state.rebind_extra(|extra| extra.field_name = Some(root_field_py_str(py)));
+            let root_field = root_field_py_str(py);
+            let state = &mut state.scoped_set_field_name(Some(root_field.clone()));
             let output = self.validator.validate(py, input, state)?;
 
             let fields_set = if input.as_python().is_some_and(|py_input| py_input.is(&self.undefined)) {
                 PySet::empty(py)?
             } else {
-                PySet::new(py, [&String::from(ROOT_FIELD)])?
+                PySet::new(py, [root_field])?
             };
             force_setattr(py, self_instance, intern!(py, DUNDER_FIELDS_SET_KEY), &fields_set)?;
-            force_setattr(py, self_instance, intern!(py, ROOT_FIELD), &output)?;
+            force_setattr(py, self_instance, root_field, &output)?;
         } else {
-            let output = self.validator.validate(py, input, state)?;
-
-            let (model_dict, model_extra, fields_set): (Bound<PyAny>, Bound<PyAny>, Bound<PyAny>) =
-                output.extract(py)?;
+            let (model_dict, model_extra, fields_set) = self.validate_inner_fields(py, input, state)?;
             set_model_attrs(self_instance, &model_dict, &model_extra, &fields_set)?;
         }
         self.call_post_init(py, self_instance.clone(), input, state.extra())
@@ -304,23 +324,22 @@ impl ModelValidator {
         let instance;
 
         if self.root_model {
-            let state = &mut state.rebind_extra(|extra| extra.field_name = Some(root_field_py_str(py)));
+            let root_field = root_field_py_str(py);
+            let state = &mut state.scoped_set_field_name(Some(root_field.clone()));
             let output = self.validator.validate(py, input, state)?;
             instance = create_class(self.class.bind(py))?;
 
             let fields_set = if input.as_python().is_some_and(|py_input| py_input.is(&self.undefined)) {
                 PySet::empty(py)?
             } else {
-                PySet::new(py, [&String::from(ROOT_FIELD)])?
+                PySet::new(py, [root_field])?
             };
             force_setattr(py, &instance, intern!(py, DUNDER_FIELDS_SET_KEY), &fields_set)?;
-            force_setattr(py, &instance, intern!(py, ROOT_FIELD), output)?;
+            force_setattr(py, &instance, root_field, output)?;
         } else {
-            let output = self.validator.validate(py, input, state)?;
+            let (model_dict, model_extra, val_fields_set) = self.validate_inner_fields(py, input, state)?;
             instance = create_class(self.class.bind(py))?;
 
-            let (model_dict, model_extra, val_fields_set): (Bound<PyAny>, Bound<PyAny>, Bound<PyAny>) =
-                output.extract(py)?;
             let fields_set = existing_fields_set.unwrap_or(&val_fields_set);
             set_model_attrs(&instance, &model_dict, &model_extra, fields_set)?;
         }
@@ -391,12 +410,4 @@ where
             ffi::PyObject_GenericSetAttr(obj.as_ptr(), attr_name.as_ptr(), value.as_ptr()),
         )
     }
-}
-
-fn root_field_py_str(py: Python<'_>) -> Bound<'_, PyString> {
-    static ROOT_FIELD_PY_STR: PyOnceLock<Py<PyString>> = PyOnceLock::new();
-    ROOT_FIELD_PY_STR
-        .get_or_init(py, || PyString::new(py, ROOT_FIELD).unbind())
-        .bind(py)
-        .clone()
 }

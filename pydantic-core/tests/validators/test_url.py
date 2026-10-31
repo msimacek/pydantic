@@ -1,11 +1,20 @@
+import platform
 import re
 from copy import deepcopy
-from typing import Optional, Union
 
 import pytest
 from dirty_equals import HasRepr, IsInstance
 
-from pydantic_core import CoreConfig, MultiHostUrl, SchemaError, SchemaValidator, Url, ValidationError, core_schema
+from pydantic_core import (
+    CoreConfig,
+    MultiHostHost,
+    MultiHostUrl,
+    SchemaError,
+    SchemaValidator,
+    Url,
+    ValidationError,
+    core_schema,
+)
 
 from ..conftest import Err, PyAndJson
 
@@ -60,7 +69,7 @@ MULTI_URL_CLASS_MODE = 'MULTI_URL_CLASS'
 
 
 def url_test_case_helper(
-    url: str, expected: Union[Err, str], validator_mode: str, url_validator: Optional[SchemaValidator] = None
+    url: str, expected: Err | str, validator_mode: str, url_validator: SchemaValidator | None = None
 ):
     if isinstance(expected, Err):
         with pytest.raises(ValidationError) as exc_info:
@@ -296,7 +305,7 @@ def test_url_cases(url_validator, url, expected, mode):
         ('http://example.com/path/?x=1', 'http://example.com/path/?x=1', '/path/'),
     ],
 )
-def test_trailing_slash(url: str, expected: str, expected_path: Optional[str]):
+def test_trailing_slash(url: str, expected: str, expected_path: str | None):
     url1 = Url(url, preserve_empty_path=True)
     assert str(url1) == expected
     assert url1.unicode_string() == expected
@@ -331,7 +340,7 @@ def test_trailing_slash(url: str, expected: str, expected_path: Optional[str]):
         ('http://localhost,127.0.0.1/path/', 'http://localhost,127.0.0.1/path/', '/path/'),
     ],
 )
-def test_multi_trailing_slash(url: str, expected: str, expected_path: Optional[str]):
+def test_multi_trailing_slash(url: str, expected: str, expected_path: str | None):
     url1 = MultiHostUrl(url, preserve_empty_path=True)
     assert str(url1) == expected
     assert url1.unicode_string() == expected
@@ -469,7 +478,6 @@ def strict_url_validator_fixture():
         ('http://user:@example.org', 'http://user@example.org/'),
         ('http://us[er:@example.org', Err('non-URL code point', 'url_syntax_violation')),
         ('http://us%5Ber:bar@example.org', 'http://us%5Ber:bar@example.org/'),
-        ('http://user:@example.org', 'http://user@example.org/'),
         ('mongodb://us%5Ber:bar@example.org', 'mongodb://us%5Ber:bar@example.org'),
         ('mongodb://us@er@example.org', Err('unencoded @ sign in username or password', 'url_syntax_violation')),
     ],
@@ -726,6 +734,29 @@ def test_multi_host_url_ok_2(py_and_json: PyAndJson):
         {'username': None, 'password': None, 'host': 'foo.com', 'port': 443},
         {'username': None, 'password': None, 'host': 'bar.com', 'port': 443},
     ]
+
+
+@pytest.mark.timeout(
+    # PyPy and GraalPy are ~3-5x slower, even in linear time:
+    20 if platform.python_implementation() in {'PyPy', 'GraalVM'} else 5
+)
+@pytest.mark.parametrize(
+    ['prefix', 'expected_prefix', 'expected_suffix', 'expected_port'],
+    [
+        (' ' * 150_000 + 'postgres://', 'postgres://', '', None),
+        ('http:' + '/' * 150_000, 'http://', '/', 80),
+    ],
+    ids=['leading_whitespace', 'slashes'],
+)
+def test_multi_host_url_linear_time(prefix: str, expected_prefix: str, expected_suffix: str, expected_port: int | None):
+    """The prefix before the hosts must not be parsed again for every host."""
+    hosts = ','.join(['h'] * 150_000)
+
+    url = MultiHostUrl(prefix + hosts)
+
+    assert str(url) == expected_prefix + hosts + expected_suffix
+    assert url.hosts()[0] == {'username': None, 'password': None, 'host': 'h', 'port': expected_port}
+    assert len(url.hosts()) == 150_000
 
 
 @pytest.fixture(scope='module', name='multi_host_url_validator')
@@ -1331,7 +1362,7 @@ def test_multi_url_build() -> None:
         False,
     ],
 )
-def test_url_build_not_encode_credentials(url_type: type[Union[Url, MultiHostUrl]], include_kwarg: bool) -> None:
+def test_url_build_not_encode_credentials(url_type: type[Url | MultiHostUrl], include_kwarg: bool) -> None:
     kwargs = {}
     if include_kwarg:
         kwargs['encode_credentials'] = False
@@ -1369,7 +1400,7 @@ def test_url_build_not_encode_credentials(url_type: type[Union[Url, MultiHostUrl
 
 @pytest.mark.xfail(reason='semantics of `encode_credentials` need to be fully decided, not enabled yet')
 @pytest.mark.parametrize('url_type', [Url, MultiHostUrl])
-def test_url_build_encode_credentials(url_type: type[Union[Url, MultiHostUrl]]) -> None:
+def test_url_build_encode_credentials(url_type: type[Url | MultiHostUrl]) -> None:
     url = url_type.build(
         scheme='postgresql',
         username='user name',
@@ -1464,12 +1495,17 @@ def test_multi_url_build_hosts_empty_host() -> None:
 
 def test_multi_url_build_hosts() -> None:
     """Hosts can't be provided with any single url values."""
-    hosts = [
+    hosts: list[MultiHostHost] = [
         {'host': '127.0.0.1', 'password': 'testpassword', 'username': 'testuser', 'port': 5431},
         {'host': '127.0.0.1', 'password': 'testpassword', 'username': 'testuser', 'port': 5433},
     ]
-    kwargs = dict(scheme='postgresql', hosts=hosts, path='database', query='sslmode=require', fragment='test')
-    url = MultiHostUrl.build(**kwargs)
+    url = MultiHostUrl.build(
+        scheme='postgresql',
+        hosts=hosts,
+        path='database',
+        query='sslmode=require',
+        fragment='test',
+    )
     assert url == MultiHostUrl(
         'postgresql://testuser:testpassword@127.0.0.1:5431,testuser:testpassword@127.0.0.1:5433/database?sslmode=require#test'
     )

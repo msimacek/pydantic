@@ -3,7 +3,7 @@ import re
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Union
+from typing import Any
 
 import pytest
 from dirty_equals import Contains, HasRepr, IsInstance, IsList, IsStr
@@ -476,8 +476,8 @@ class MyMapping(collections.abc.Mapping):
 @dataclass
 class ListInputTestCase:
     input: Any
-    output: Union[Any, Err]
-    strict: Union[bool, None] = None
+    output: Any | Err
+    strict: bool | None = None
 
 
 LAX_MODE_INPUTS: list[Any] = [
@@ -537,7 +537,7 @@ def test_list_allowed_inputs_python(testcase: ListInputTestCase):
 def test_list_dict_items_input(testcase: ListInputTestCase) -> None:
     v = SchemaValidator(
         core_schema.list_schema(
-            core_schema.tuple_positional_schema([core_schema.int_schema(), core_schema.int_schema()]),
+            core_schema.tuple_schema([core_schema.int_schema(), core_schema.int_schema()]),
             strict=testcase.strict,
         )
     )

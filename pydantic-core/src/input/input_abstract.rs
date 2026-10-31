@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::fmt;
 
+use jiter::JsonValue;
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::{IntoPyObjectExt, intern, prelude::*};
@@ -55,7 +56,7 @@ pub type ValMatch<T> = ValResult<ValidationMatch<T>>;
 /// the convention is to either implement:
 /// * `strict_*` & `lax_*` if they have different behavior
 /// * or, `validate_*` and `strict_*` to just call `validate_*` if the behavior for strict and lax is the same
-pub trait Input<'py>: fmt::Debug {
+pub(crate) trait Input<'py>: fmt::Debug {
     fn py_converter(&self) -> impl IntoPyObject<'py> + '_;
 
     #[inline]
@@ -70,6 +71,15 @@ pub trait Input<'py>: fmt::Debug {
     }
 
     fn as_python(&self) -> Option<&Bound<'py, PyAny>> {
+        None
+    }
+
+    /// Identity of the input, used by the recursion guard to detect cycles and limit the depth.
+    ///
+    /// Inputs without an identity (e.g. JSON) can't be cyclic.
+    fn identity(&self) -> Option<usize>;
+
+    fn as_json(&self) -> Option<&JsonValue<'_>> {
         None
     }
 
@@ -115,6 +125,8 @@ pub trait Input<'py>: fmt::Debug {
 
     fn validate_decimal(&self, strict: bool, py: Python<'py>) -> ValMatch<Bound<'py, PyAny>>;
 
+    fn validate_fraction(&self, strict: bool, py: Python<'py>) -> ValMatch<Bound<'py, PyAny>>;
+
     type Dict<'a>: ValidatedDict<'py>
     where
         Self: 'a;
@@ -128,6 +140,45 @@ pub trait Input<'py>: fmt::Debug {
         self.strict_dict()
     }
 
+    fn validate_frozendict(&self, strict: bool) -> ValMatch<Self::Dict<'_>> {
+        if strict {
+            self.strict_frozendict()
+        } else {
+            self.lax_frozendict()
+        }
+    }
+    fn strict_frozendict(&self) -> ValMatch<Self::Dict<'_>>;
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn lax_frozendict(&self) -> ValMatch<Self::Dict<'_>> {
+        self.strict_frozendict()
+    }
+
+    fn validate_ordered_dict(&self, strict: bool) -> ValMatch<Self::Dict<'_>> {
+        if strict {
+            self.strict_ordered_dict()
+        } else {
+            self.lax_ordered_dict()
+        }
+    }
+    fn strict_ordered_dict(&self) -> ValMatch<Self::Dict<'_>>;
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn lax_ordered_dict(&self) -> ValMatch<Self::Dict<'_>> {
+        self.strict_ordered_dict()
+    }
+
+    fn validate_counter(&self, strict: bool) -> ValMatch<Self::Dict<'_>> {
+        if strict {
+            self.strict_counter()
+        } else {
+            self.lax_counter()
+        }
+    }
+    fn strict_counter(&self) -> ValMatch<Self::Dict<'_>>;
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn lax_counter(&self) -> ValMatch<Self::Dict<'_>> {
+        self.strict_counter()
+    }
+
     fn validate_model_fields(&self, strict: bool, _from_attributes: bool) -> ValResult<Self::Dict<'_>> {
         self.validate_dict(strict)
     }
@@ -137,6 +188,8 @@ pub trait Input<'py>: fmt::Debug {
         Self: 'a;
 
     fn validate_list(&self, strict: bool) -> ValMatch<Self::List<'_>>;
+
+    fn validate_deque(&self, strict: bool) -> ValMatch<(Self::List<'_>, Option<usize>)>;
 
     type Tuple<'a>: ValidatedTuple<'py>
     where
@@ -183,7 +236,7 @@ pub trait Input<'py>: fmt::Debug {
 /// this trait we abstract over whether the return value from the iterator is owned
 /// or borrowed; all we care about is that we can borrow it again with `borrow_input`
 /// for some lifetime 'a.
-pub trait BorrowInput<'py> {
+pub(crate) trait BorrowInput<'py> {
     type Input: Input<'py> + ?Sized;
     fn borrow_input(&self) -> &Self::Input;
 }
@@ -232,7 +285,7 @@ pub trait ConsumeIterator<T> {
 }
 
 /// For validations from a dictionary
-pub trait ValidatedDict<'py> {
+pub(crate) trait ValidatedDict<'py> {
     type Key<'a>: BorrowInput<'py> + Clone + Into<LocItem>
     where
         Self: 'a;

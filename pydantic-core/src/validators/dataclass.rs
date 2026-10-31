@@ -18,7 +18,6 @@ use crate::input::{
 use crate::lookup_key::LookupPathCollection;
 use crate::lookup_key::LookupType;
 use crate::tools::SchemaDict;
-use crate::tools::pybackedstr_to_pystring;
 use crate::validators::function::convert_err;
 
 use super::model::{Revalidate, create_class, force_setattr};
@@ -157,8 +156,8 @@ impl Validator for DataclassArgsValidator {
         let mut errors: Vec<ValLineError> = Vec::new();
         let mut used_keys: AHashSet<&str> = AHashSet::with_capacity(self.fields.len());
 
-        let state = &mut state.rebind_extra(|extra| extra.data = Some(output_dict.clone()));
-        let state = &mut state.scoped_set(|state| &mut state.has_field_error, false);
+        let state = &mut state.scoped_set_data(Some(output_dict.clone()));
+        let state = &mut state.scoped_clear_field_error();
 
         let extra_behavior = state.extra_behavior_or(self.extra_behavior);
 
@@ -218,8 +217,7 @@ impl Validator for DataclassArgsValidator {
             }
             let kw_value = kw_value.as_ref().map(|(path, value)| (path, value.borrow_input()));
 
-            let state =
-                &mut state.rebind_extra(|extra| extra.field_name = Some(pybackedstr_to_pystring(py, &field.name)));
+            let state = &mut state.scoped_set_field_name(Some(field.name.as_py_str().bind(py).clone()));
 
             match (pos_value, kw_value) {
                 // found both positional and keyword arguments, error
@@ -266,6 +264,7 @@ impl Validator for DataclassArgsValidator {
                             set_item!(field, value);
                         }
                         Ok(None) => {
+                            state.has_field_error = true;
                             let error_type = ErrorTypeDefaults::Missing;
                             let error_loc = field.lookup_path_collection.error_loc(lookup_type, self.loc_by_alias);
                             // This means there was no default value
@@ -303,6 +302,8 @@ impl Validator for DataclassArgsValidator {
         if let Some(kwargs) = args.kwargs()
             && kwargs.len() != used_keys.len()
         {
+            // Built lazily, only if an extra key needs to be checked against it
+            let mut field_names: Option<AHashSet<&str>> = None;
             for result in kwargs.iter() {
                 let (raw_key, value) = result?;
                 match raw_key
@@ -311,7 +312,8 @@ impl Validator for DataclassArgsValidator {
                     .map(ValidationMatch::into_inner)
                 {
                     Ok(either_str) => {
-                        if !used_keys.contains(either_str.as_cow()?.as_ref()) {
+                        let cow = either_str.as_cow()?;
+                        if !used_keys.contains(cow.as_ref()) {
                             // Unknown / extra field
                             match extra_behavior {
                                 ExtraBehavior::Forbid => {
@@ -322,6 +324,12 @@ impl Validator for DataclassArgsValidator {
                                     ));
                                 }
                                 ExtraBehavior::Ignore => {}
+                                // An extra key matching a field name (e.g. when validating by alias) is
+                                // ignored, as it would otherwise override the field.
+                                ExtraBehavior::Allow
+                                    if field_names
+                                        .get_or_insert_with(|| self.fields.iter().map(|field| &*field.name).collect())
+                                        .contains(cow.as_ref()) => {}
                                 ExtraBehavior::Allow => {
                                     if let Some(ref validator) = self.extras_validator {
                                         match validator.validate(py, value.borrow_input(), state) {
@@ -409,10 +417,8 @@ impl Validator for DataclassArgsValidator {
                 }
             }
 
-            let state = &mut state.rebind_extra(|extra| {
-                extra.data = Some(data_dict.clone());
-                extra.field_name = Some(pybackedstr_to_pystring(py, &field.name));
-            });
+            let state = &mut state.scoped_set_data(Some(data_dict.clone()));
+            let state = &mut state.scoped_set_field_name(Some(field.name.as_py_str().bind(py).clone()));
 
             match field.validator.validate(py, field_value, state) {
                 Ok(output) => ok(output),
@@ -529,7 +535,7 @@ impl Validator for DataclassValidator {
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
-        if let Some(self_instance) = state.extra().self_instance {
+        if let Some(self_instance) = state.self_instance {
             // in the case that self_instance is Some, we're calling validation from within `BaseModel.__init__`
             return self.validate_init(py, self_instance, input, state);
         }
@@ -633,7 +639,7 @@ impl DataclassValidator {
     ) -> ValResult<Py<PyAny>> {
         // we need to set `self_instance` to None for nested validators as we don't want to operate on the self_instance
         // instance anymore
-        let state = &mut state.rebind_extra(|extra| extra.self_instance = None);
+        let state = &mut state.scoped_clear_self_instance();
         let val_output = self.validator.validate(py, input, state)?;
 
         self.set_dict_call(py, self_instance, val_output, input)?;

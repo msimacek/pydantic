@@ -130,7 +130,7 @@ assert user.id == 321
 
     For example, the following will not behave as expected and would yield a validation error:
 
-    ```python {test="skip"}
+    ```python {test="skip" lint="skip" upgrade="skip"}
     from typing import Optional
 
     from pydantic import BaseModel
@@ -176,10 +176,6 @@ Model instances possess the following attributes:
 
 !!! note
     See the API documentation of [`BaseModel`][pydantic.main.BaseModel] for the class definition including a full list of methods and attributes.
-
-!!! tip
-    See [Changes to `pydantic.BaseModel`](../migration.md#changes-to-pydanticbasemodel) in the
-    [Migration Guide](../migration.md) for details on changes from Pydantic V1.
 
 ## Data conversion
 
@@ -275,26 +271,46 @@ The configuration can take three values:
 * `'allow'`: Providing extra data is allowed and stored in the `__pydantic_extra__` dictionary attribute.
   The `__pydantic_extra__` can explicitly be annotated to provide validation for extra fields.
 
-The validation methods (e.g. [`model_validate()`][pydantic.main.BaseModel.model_validate]) have an optional `extra` argument
+The [validation methods](#validating-data) (e.g. [`model_validate()`][pydantic.main.BaseModel.model_validate]) have an optional `extra` argument
 that will override the `extra` configuration value of the model for that validation call.
 
-For more details, refer to the [`extra`][pydantic.ConfigDict.extra] API documentation.
+Any key that isn't used to populate a field is considered extra data. This includes keys matching an [alias](./alias.md#aliaspath-and-aliaschoices)
+of a field that ended up not being used, because an alias with a higher priority was provided:
+
+```python
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+
+class User(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
+    name: str = Field(validation_alias=AliasChoices('first_name', 'fname'))
+
+
+user = User.model_validate({'fname': 'J', 'first_name': 'John'})
+print(user.name)
+#> John
+print(user.__pydantic_extra__)
+#> {'fname': 'J'}
+```
+
+Extra data is validated after all the fields (see [field ordering](#field-ordering)).
 
 Pydantic dataclasses also support extra data (see the [dataclass configuration](./dataclasses.md#dataclass-config) section).
+
+For more details, refer to the [`extra`][pydantic.ConfigDict.extra] API documentation.
 
 ## Nested models
 
 More complex hierarchical data structures can be defined using models themselves as types in annotations.
 
 ```python
-from typing import Optional
-
 from pydantic import BaseModel
 
 
 class Foo(BaseModel):
     count: int
-    size: Optional[float] = None
+    size: float | None = None
 
 
 class Bar(BaseModel):
@@ -321,8 +337,80 @@ print(m.model_dump())
 """
 ```
 
-Self-referencing models are supported. For more details, see  the documentation related to
-[forward annotations](forward_annotations.md#self-referencing-or-recursive-models).
+### Cyclic references
+
+When working with self-referencing recursive models, it is possible that you might encounter cyclic references
+in validation inputs. For example, this can happen when validating ORM instances with back-references from
+attributes.
+
+Rather than raising a [`RecursionError`][] while attempting to validate data with cyclic references, Pydantic is able
+to detect the cyclic reference and raise an appropriate [`ValidationError`][pydantic_core.ValidationError]:
+
+=== "Python 3.10 and above"
+
+    ```python
+    from pydantic import BaseModel, ValidationError
+
+
+    class ModelA(BaseModel):
+        b: 'ModelB | None' = None  # (1)!
+
+
+    class ModelB(BaseModel):
+        a: ModelA | None = None
+
+
+    cyclic_data = {}
+    cyclic_data['a'] = {'b': cyclic_data}
+    print(cyclic_data)
+    #> {'a': {'b': {...}}}
+
+    try:
+        ModelB.model_validate(cyclic_data)
+    except ValidationError as exc:
+        print(exc)
+        """
+        1 validation error for ModelB
+        a.b
+          Recursion error - cyclic reference detected [type=recursion_loop, input_value={'a': {'b': {...}}}, input_type=dict]
+        """
+    ```
+
+    1. As `ModelB` is not yet defined, a [forward annotation](forward_annotations.md) needs to be used.
+
+=== "Python 3.14 and above"
+
+    ```python {requires="3.14" lint="skip"}
+    from pydantic import BaseModel, ValidationError
+
+
+    class ModelA(BaseModel):
+        b: ModelB | None = None
+
+
+    class ModelB(BaseModel):
+        a: ModelA | None = None
+
+
+    cyclic_data = {}
+    cyclic_data['a'] = {'b': cyclic_data}
+    print(cyclic_data)
+    #> {'a': {'b': {...}}}
+
+    try:
+        ModelB.model_validate(cyclic_data)
+    except ValidationError as exc:
+        print(exc)
+        """
+        1 validation error for ModelB
+        a.b
+          Recursion error - cyclic reference detected [type=recursion_loop, input_value={'a': {'b': {...}}}, input_type=dict]
+        """
+    ```
+
+See also: the [cyclic references example](../examples/cyclic_references.md), showing how to handle such
+cyclic references during validation and serialization, and the [cyclic imports](forward_annotations.md#cyclic-imports)
+section, for models referencing each other from separate modules.
 
 ## Rebuilding model schema
 
@@ -374,8 +462,7 @@ print(Foo.model_json_schema())
 Pydantic tries to determine when this is necessary automatically and error if it wasn't done, but you may want to
 call [`model_rebuild()`][pydantic.main.BaseModel.model_rebuild] proactively when dealing with recursive models or generics.
 
-In V2, [`model_rebuild()`][pydantic.main.BaseModel.model_rebuild] replaced `update_forward_refs()` from V1. There are some slight differences with the new behavior.
-The biggest change is that when calling [`model_rebuild()`][pydantic.main.BaseModel.model_rebuild] on the outermost model, it builds a core schema used for validation of the
+When calling [`model_rebuild()`][pydantic.main.BaseModel.model_rebuild] on the outermost model, it builds a core schema used for validation of the
 whole model (nested models and all), so all types at all levels need to be ready before [`model_rebuild()`][pydantic.main.BaseModel.model_rebuild] is called.
 
 ## Validating data
@@ -409,7 +496,6 @@ Compared to using the model constructor, it is possible to control several valid
 
 ```python
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -417,7 +503,7 @@ from pydantic import BaseModel, ValidationError
 class User(BaseModel):
     id: int
     name: str = 'John Doe'
-    signup_ts: Optional[datetime] = None
+    signup_ts: datetime | None = None
 
 
 m = User.model_validate({'id': 123, 'name': 'James'})
@@ -562,6 +648,11 @@ except ValidationError as e:
     """
 ```
 
+In an example like this one, the offending `data` is right there in the code. A
+[`ValidationError`][pydantic_core.ValidationError] includes the value rejected at each failing
+location, but in a running application you may also need those details in their request or job
+context. [Logfire records failed validations](../errors/troubleshooting.md) with both.
+
 ## Arbitrary class instances
 
 (Formerly known as "ORM Mode"/`from_orm()`).
@@ -666,7 +757,7 @@ print(anna_model)
 ??? api "API Documentation"
     [`pydantic.main.BaseModel.model_copy`][pydantic.main.BaseModel.model_copy]<br>
 
-The [`model_copy()`][pydantic.BaseModel.model_copy] method allows models to be duplicated (with optional updates),
+The [`model_copy()`][pydantic.BaseModel.model_copy] method allows models to be duplicated (with optional updates that *aren't* validated),
 which is particularly useful when working with frozen models.
 
 ```python
@@ -708,7 +799,7 @@ Here is an example using a generic Pydantic model to create an easily-reused HTT
 
 <!-- TODO: tabs should be auto-generated if using Ruff (https://github.com/pydantic/pydantic/issues/10083) -->
 
-=== "Python 3.9 and above"
+=== "Python 3.10 and above"
 
     ```python {upgrade="skip"}
     from typing import Generic, TypeVar
@@ -790,6 +881,10 @@ Here is an example using a generic Pydantic model to create an easily-reused HTT
 
     1. Declare a Pydantic model and add the list of type variables as type parameters.
     2. Use the type variables as annotations where you will want to replace them with other types.
+
+/// version-added | v2.11
+Full support for the [type parameter syntax][type-params] and [type variable defaults](https://typing.python.org/en/latest/spec/generics.html#type-parameter-defaults).
+///
 
 !!! warning
     When parametrizing a model with a concrete type, Pydantic **does not** validate that the provided type
@@ -952,7 +1047,7 @@ except ValidationError as e:
     """
 ```
 
-1. The `OuterT` model is parametrized with `int`, but the data associated with the the `T` annotations during validation is of type `str`, leading to validation errors.
+1. The `OuterT` model is parametrized with `int`, but the data associated with the `T` annotations during validation is of type `str`, leading to validation errors.
 
 !!! warning
     While it may not raise an error, we strongly advise against using parametrized generics in [`isinstance()`](https://docs.python.org/3/library/functions.html#isinstance) checks.
@@ -1287,6 +1382,11 @@ Field definitions are specified as keyword arguments, and should either be:
 * A two-tuple, the first element being the type and the second element the assigned value
   (either a default or the [`Field()`][pydantic.Field] function).
 
+/// version-changed | v2.11
+When providing a single element for field definitions, any type can be used
+(previously, only an [`Annotated`][typing.Annotated] form could be provided).
+///
+
 Here is a more advanced example:
 
 ```python
@@ -1332,43 +1432,63 @@ print(BarModel.model_fields.keys())
 #> dict_keys(['foo', 'bar', 'apple', 'banana'])
 ```
 
-You can also add validators by passing a dictionary to the `__validators__` argument.
+Attributes such as [validators](./validators.md), methods or [computed fields](./fields.md#the-computed_field-decorator)
+can be added to the class namespace using the `__namespace__` argument:
 
 ```python {rewrite_assert="false"}
-from pydantic import ValidationError, create_model, field_validator
+from pydantic import (
+    ValidationError,
+    computed_field,
+    create_model,
+    field_validator,
+)
 
 
-def alphanum(cls, v):
+def alphanum(cls, v: str) -> str:
     assert v.isalnum(), 'must be alphanumeric'
     return v
 
 
-validators = {
-    'username_validator': field_validator('username')(alphanum)  # (1)!
-}
+def full_name(self) -> str:
+    return f'{self.first_name} {self.last_name}'
+
 
 UserModel = create_model(
-    'UserModel', username=(str, ...), __validators__=validators
+    'UserModel',
+    first_name=str,
+    last_name=str,
+    __namespace__={  # (1)!
+        'check_alphanum': field_validator('first_name', 'last_name')(alphanum),
+        'full_name': computed_field(property(full_name)),
+    },
 )
 
-user = UserModel(username='scolvin')
-print(user)
-#> username='scolvin'
+user = UserModel(first_name='John', last_name='Doe')
+print(user.model_dump())
+#> {'first_name': 'John', 'last_name': 'Doe', 'full_name': 'John Doe'}
 
 try:
-    UserModel(username='scolvi%n')
+    UserModel(first_name='J%hn', last_name='Doe')
 except ValidationError as e:
     print(e)
     """
     1 validation error for UserModel
-    username
-      Assertion failed, must be alphanumeric [type=assertion_error, input_value='scolvi%n', input_type=str]
+    first_name
+      Assertion failed, must be alphanumeric [type=assertion_error, input_value='J%hn', input_type=str]
     """
 ```
 
-1. Make sure that the validators names do not clash with any of the field names as
+1. The keys of the namespace must not clash with any of the field names as
    internally, Pydantic gathers all members into a namespace and mimics the normal
    creation of a class using the [`types` module utilities](https://docs.python.org/3/library/types.html#dynamic-type-creation).
+
+/// version-added | v2.14
+The `__namespace__` argument.
+///
+
+/// version-removed | v3
+The `__validators__` argument, use `__namespace__` instead.
+///
 
 !!! note
     To pickle a dynamically created model:
@@ -1422,30 +1542,6 @@ print(PetsByName.model_validate({'Otis': 'dog', 'Milo': 'cat'}))
 #> root={'Otis': 'dog', 'Milo': 'cat'}
 ```
 
-If you want to access items in the `root` field directly or to iterate over the items, you can implement
-custom `__iter__` and `__getitem__` functions, as shown in the following example.
-
-```python
-from pydantic import RootModel
-
-
-class Pets(RootModel):
-    root: list[str]
-
-    def __iter__(self):
-        return iter(self.root)
-
-    def __getitem__(self, item):
-        return self.root[item]
-
-
-pets = Pets.model_validate(['dog', 'cat'])
-print(pets[0])
-#> dog
-print([pet for pet in pets])
-#> ['dog', 'cat']
-```
-
 You can also create subclasses of the parametrized root model directly:
 
 ```python
@@ -1467,10 +1563,6 @@ print(my_pets.describe())
 
 Models can be configured to be immutable via `model_config['frozen'] = True`. When this is set, attempting to change the
 values of instance attributes will raise errors. See the [API reference][pydantic.config.ConfigDict.frozen] for more details.
-
-!!! note
-    This behavior was achieved in Pydantic V1 via the config setting `allow_mutation = False`.
-    This config flag is deprecated in Pydantic V2, and has been replaced with `frozen`.
 
 !!! warning
     In Python, immutability is not enforced. Developers have the ability to modify objects
@@ -1538,6 +1630,7 @@ Field order affects models in the following ways:
 * field order is preserved in the model [JSON Schema](json_schema.md)
 * field order is preserved in [validation errors](#error-handling)
 * field order is preserved when [serializing data](serialization.md#serializing-data)
+* fields are validated in order, and before [extra data](#extra-data)
 
 ```python
 from pydantic import BaseModel, ValidationError
@@ -1629,6 +1722,10 @@ print(m._secret_value)
 Private attribute names must start with underscore to prevent conflicts with model fields. However, dunder names
 (such as `__attr__`) are not supported, and will be completely ignored from the model definition.
 
+/// version-added | v2.13
+Default factories can take the validated model data as an argument.
+///
+
 ## Model signature
 
 All Pydantic models will have their signature generated based on their fields:
@@ -1685,7 +1782,7 @@ a `**data` argument will be added. In addition, the `**data` argument will alway
 
 Pydantic supports structural pattern matching for models, as introduced by [PEP 636](https://peps.python.org/pep-0636/) in Python 3.10.
 
-```python {requires="3.10" lint="skip"}
+```python {lint="skip"}
 from pydantic import BaseModel
 
 
@@ -1745,4 +1842,4 @@ print(f'{id(c1.arr) == id(c2.arr)=}')
 !!! note
     There are some situations where Pydantic does not copy attributes, such as when passing models &mdash; we use the
     model as is. You can override this behaviour by setting
-    [`model_config['revalidate_instances'] = 'always'`](../api/config.md#pydantic.config.ConfigDict).
+    [`model_config['revalidate_instances'] = 'always'`](../api/config.md#pydantic.config.ConfigDict.revalidate_instances).

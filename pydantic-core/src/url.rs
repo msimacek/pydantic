@@ -38,7 +38,7 @@ pub struct PyUrl {
 impl Hash for PyUrl {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.lib_url.hash(state);
-        self.path_is_empty.hash(state);
+        self.has_empty_path().hash(state);
         // no need to hash `serialized` as it's derived from the other two fields
     }
 }
@@ -57,11 +57,18 @@ impl PyUrl {
     }
 
     pub fn url_mut(&mut self) -> &mut Url {
+        // the URL is about to be mutated, invalidate the serialization cache:
+        self.serialized.take();
         &mut self.lib_url
     }
 
+    /// Whether the path should be treated as empty.
+    fn has_empty_path(&self) -> bool {
+        self.path_is_empty && self.lib_url.path() == "/"
+    }
+
     fn serialized(&self, py: Python<'_>) -> &str {
-        if self.path_is_empty {
+        if self.has_empty_path() {
             self.serialized
                 .get_or_init_py_attached(py, || serialize_url_without_path_slash(&self.lib_url))
         } else {
@@ -86,7 +93,6 @@ impl PyUrl {
                         None,
                         None,
                         None,
-                        None,
                         InputType::Python,
                         StringCacheMode::None,
                         None,
@@ -94,6 +100,8 @@ impl PyUrl {
                     ),
                     &mut RecursionState::default(),
                     PartialMode::Off,
+                    None,
+                    None,
                 ),
             )
             .map_err(|e| {
@@ -186,14 +194,17 @@ impl PyUrl {
         format!("Url('{}')", self.serialized(py))
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> PyResult<bool> {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> PyResult<bool> {
+        // compare the serialized form (and not `lib_url`) to account for `path_is_empty`,
+        // consistently with `__hash__()`:
+        let (this, other) = (self.serialized(py), other.serialized(py));
         match op {
-            CompareOp::Lt => Ok(self.lib_url < other.lib_url),
-            CompareOp::Le => Ok(self.lib_url <= other.lib_url),
-            CompareOp::Eq => Ok(self.lib_url == other.lib_url),
-            CompareOp::Ne => Ok(self.lib_url != other.lib_url),
-            CompareOp::Gt => Ok(self.lib_url > other.lib_url),
-            CompareOp::Ge => Ok(self.lib_url >= other.lib_url),
+            CompareOp::Lt => Ok(this < other),
+            CompareOp::Le => Ok(this <= other),
+            CompareOp::Eq => Ok(this == other),
+            CompareOp::Ne => Ok(this != other),
+            CompareOp::Gt => Ok(this > other),
+            CompareOp::Ge => Ok(this >= other),
         }
     }
 
@@ -295,7 +306,7 @@ impl PyMultiHostUrl {
     }
 
     pub fn mut_lib_url(&mut self) -> &mut Url {
-        &mut self.ref_url.lib_url
+        self.ref_url.url_mut()
     }
 }
 
@@ -315,7 +326,6 @@ impl PyMultiHostUrl {
                         None,
                         None,
                         None,
-                        None,
                         InputType::Python,
                         StringCacheMode::None,
                         None,
@@ -323,6 +333,8 @@ impl PyMultiHostUrl {
                     ),
                     &mut RecursionState::default(),
                     PartialMode::Off,
+                    None,
+                    None,
                 ),
             )
             .map_err(|e| {
@@ -393,7 +405,8 @@ impl PyMultiHostUrl {
 
             for url in extra_urls {
                 let str = unicode_url(url.as_str(), url);
-                extra_hosts.push_str(&str[host_offset..str.len() - sub]);
+                // extra urls don't necessarily have the same scheme as the main one (see `parse_multihost_url()`):
+                extra_hosts.push_str(&str[url.scheme().len() + 3..str.len() - sub]);
                 extra_hosts.push(',');
             }
 
@@ -419,7 +432,8 @@ impl PyMultiHostUrl {
 
             for url in extra_urls {
                 let str = url.as_str();
-                extra_hosts.push_str(&str[host_offset..str.len() - sub]);
+                // extra urls don't necessarily have the same scheme as the main one (see `parse_multihost_url()`):
+                extra_hosts.push_str(&str[url.scheme().len() + 3..str.len() - sub]);
                 extra_hosts.push(',');
             }
 
@@ -608,10 +622,10 @@ impl FromPyObject<'_, '_> for UrlHostParts {
         let py = ob.py();
         let dict = ob.cast::<PyDict>()?;
         Ok(UrlHostParts {
-            username: dict.get_as(intern!(py, "username"))?,
-            password: dict.get_as(intern!(py, "password"))?,
-            host: dict.get_as(intern!(py, "host"))?,
-            port: dict.get_as(intern!(py, "port"))?,
+            username: dict.get_as::<Option<String>>(intern!(py, "username"))?.flatten(),
+            password: dict.get_as::<Option<String>>(intern!(py, "password"))?.flatten(),
+            host: dict.get_as::<Option<String>>(intern!(py, "host"))?.flatten(),
+            port: dict.get_as::<Option<u16>>(intern!(py, "port"))?.flatten(),
         })
     }
 }

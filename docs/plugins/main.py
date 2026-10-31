@@ -19,6 +19,7 @@ from build.__main__ import (
 from jinja2 import Template  # type: ignore
 from mkdocs.config.defaults import MkDocsConfig
 from mkdocs.exceptions import PluginError
+from mkdocs.plugins import event_priority
 from mkdocs.structure.files import Files
 from mkdocs.structure.pages import Page
 from packaging.version import Version
@@ -39,6 +40,19 @@ except ImportError:
     from conversion_table import conversion_table
 
 # Start definition of MkDocs hooks
+
+
+@event_priority(100)  # Run before the mkdocstrings plugin.
+def on_config(config: MkDocsConfig) -> None:
+    """
+    Register the Griffe extension documenting the `ModelMetaclass` properties on `BaseModel`.
+
+    This isn't done in `mkdocs.yml`, as its mkdocstrings options are also used by the unified documentation
+    (see https://github.com/pydantic/unified-docs), which can't load extensions from this repository.
+    """
+    python_handler = config.plugins['mkdocstrings'].config.handlers['python']
+    options = python_handler.setdefault('options', {})
+    options.setdefault('extensions', []).append(str(THIS_DIR / 'griffe_model_metaclass.py'))
 
 
 def on_pre_build(config: MkDocsConfig) -> None:
@@ -301,7 +315,7 @@ def _generate_table_heading(col_names: list[str]) -> str:
 
 
 def build_schema_mappings(markdown: str, page: Page) -> str | None:
-    if page.file.src_uri != 'usage/schema.md':
+    if page.file.src_uri != 'concepts/json_schema.md':
         return None
 
     col_names = [

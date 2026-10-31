@@ -12,7 +12,7 @@ NUM_THREADS?=1
 
 .PHONY: install  ## Install the package, dependencies, and pre-commit for local development
 install: .uv
-	uv sync --frozen --all-groups --all-packages --all-extras
+	uv sync --frozen --all-groups --no-group pyodide-build --all-packages --all-extras
 	uv pip install pre-commit
 	uv run pre-commit install --install-hooks
 
@@ -20,8 +20,18 @@ install: .uv
 rebuild-lockfiles: .uv
 	uv lock --upgrade
 
+.PHONY: build-constraints  ## Generate the hashed constraints file for build dependencies
+build-constraints: .uv
+	uv run --no-project python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['build-system']['requires']))" \
+		| uv pip compile - --universal --python-version 3.10 --generate-hashes --upgrade \
+			--custom-compile-command 'make build-constraints' -o .github/build-constraints.txt
+
+.PHONY: .rust  # Check that Rust is installed
+.rust:
+	@rustup --version || echo 'Please install Rust: https://rust-lang.org/tools/install/'
+
 .PHONY: format  ## Auto-format python source files
-format: .uv
+format: .uv .rust
 	uv run ruff check --fix $(sources)
 	uv run ruff format $(sources)
 	cargo fmt --manifest-path pydantic-core/Cargo.toml
@@ -64,7 +74,7 @@ test-typechecking-mypy: .uv
 
 .PHONY: test-typechecking-pyrefly  ## Typechecking integration tests (Pyrefly).
 test-typechecking-pyrefly: .uv
-	uv run bash -c 'cd tests/typechecking && pyrefly --version && pyrefly check'
+	uv run bash -c 'cd tests/typechecking && pyrefly --version && pyrefly check --config pyproject.toml'
 
 .PHONY: test  ## Run all tests, skipping the type-checker integration tests
 test: .uv
@@ -138,7 +148,3 @@ help:
 		'^.PHONY: .*?## .*$$' $(MAKEFILE_LIST) | \
 		sort | \
 		awk 'BEGIN {FS = ".PHONY: |## "}; {printf "\033[36m%-19s\033[0m %s\n", $$2, $$3}'
-
-.PHONY: update-v1  ## Update V1 namespace
-update-v1:
-	uv run ./update_v1.sh

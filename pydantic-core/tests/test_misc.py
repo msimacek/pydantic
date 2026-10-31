@@ -3,7 +3,7 @@ import os
 import pickle
 
 import pytest
-from typing_extensions import (
+from typing_extensions import (  # noqa: UP035 (for `get_args` and `get_origin`)
     get_args,
     get_origin,
     get_type_hints,
@@ -200,7 +200,7 @@ def test_core_schema_type_literal():
     if get_args(CoreSchemaType) != schema_types:
         literal = ''.join(f'\n    {e!r},' for e in schema_types)
         print(
-            f'python code (near end of python/pydantic_core/core_schema.py):\n\nCoreSchemaType = Literal[{literal}\n]'
+            f'python code (near end of python/pydantic_core/core_schema.py):\n\nCoreSchemaType: TypeAlias = Literal[{literal}\n]'
         )
         pytest.fail('core_schema.CoreSchemaType needs to be updated')
 
@@ -232,11 +232,20 @@ def test_unicode_error_input_repr() -> None:
     assert expected == actual
 
 
-def test_core_schema_import_field_validation_info():
-    with pytest.warns(DeprecationWarning, match='`FieldValidationInfo` is deprecated, use `ValidationInfo` instead.'):
-        core_schema.FieldValidationInfo
+def test_internal_error():
+    v = SchemaValidator(
+        core_schema.model_schema(
+            cls=int,
+            schema=core_schema.model_fields_schema(
+                fields={'f': core_schema.model_field(schema=core_schema.int_schema())}
+            ),
+        )
+    )
+    with pytest.raises(AttributeError, match="'int' object has no attribute '__dict__'"):
+        v.validate_python({'f': 123})
 
+    with pytest.raises(AttributeError, match="'int' object has no attribute '__dict__'"):
+        v.validate_json('{"f": 123}')
 
-def test_core_schema_import_missing():
-    with pytest.raises(AttributeError, match="module 'pydantic_core' has no attribute 'foobar'"):
-        core_schema.foobar
+    with pytest.raises(AttributeError, match="'int' object has no attribute '__dict__'"):
+        v.isinstance_python({'f': 123})

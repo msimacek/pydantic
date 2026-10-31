@@ -38,13 +38,7 @@ class MyStr(str): ...
         (UUID('12345678-1234-5678-1234-567812345678'), UUID('12345678-1234-5678-1234-567812345678')),
         (UUID('550e8400-e29b-41d4-a716-446655440000'), UUID('550e8400-e29b-41d4-a716-446655440000')),
         # Invalid UUIDs
-        (
-            'not-a-valid-uuid',
-            Err(
-                'Input should be a valid UUID, invalid character: expected an optional prefix of'
-                + ' `urn:uuid:` followed by [0-9a-fA-F-], found `n` at 1'
-            ),
-        ),
+        ('not-a-valid-uuid', Err('Input should be a valid UUID, invalid character: found `n` at 0')),
         (
             '12345678-1234-5678-1234-5678123456789',
             Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 13'),
@@ -236,6 +230,6 @@ def test_uuid_wrap_json():
     )
 
 
-def uuid_safety_unknown():
+def test_uuid_safety_unknown():
     output = SchemaValidator(core_schema.uuid_schema()).validate_python('a6cc5730-2261-11ee-9c43-2eb5a363657c')
     assert output.is_safe is SafeUUID.unknown

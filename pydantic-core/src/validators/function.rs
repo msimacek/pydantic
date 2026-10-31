@@ -17,14 +17,12 @@ use crate::tools::{SchemaDict, function_name, safe_repr};
 
 use super::generator::InternalValidator;
 use super::{
-    BuildValidator, CombinedValidator, DefinitionsBuilder, Extra, InputType, ValidationState, Validator,
-    build_validator,
+    BuildValidator, CombinedValidator, DefinitionsBuilder, InputType, ValidationState, Validator, build_validator,
 };
 
 struct FunctionInfo {
     /// The actual function object that will get called
     pub function: Py<PyAny>,
-    pub field_name: Option<Py<PyString>>,
     pub info_arg: bool,
 }
 
@@ -37,12 +35,7 @@ fn destructure_function_schema(schema: &Bound<'_, PyDict>) -> PyResult<FunctionI
         "no-info" => false,
         _ => unreachable!(),
     };
-    let field_name = func_dict.get_as(intern!(schema.py(), "field_name"))?;
-    Ok(FunctionInfo {
-        function,
-        field_name,
-        info_arg,
-    })
+    Ok(FunctionInfo { function, info_arg })
 }
 
 macro_rules! impl_build {
@@ -72,7 +65,6 @@ macro_rules! impl_build {
                             None => py.None(),
                         },
                         name,
-                        field_name: func_info.field_name,
                         info_arg: func_info.info_arg,
                     }
                     .into(),
@@ -88,7 +80,6 @@ pub struct FunctionBeforeValidator {
     func: Py<PyAny>,
     config: Py<PyAny>,
     name: String,
-    field_name: Option<Py<PyString>>,
     info_arg: bool,
 }
 
@@ -103,13 +94,8 @@ impl FunctionBeforeValidator {
         state: &'s mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
         let r = if self.info_arg {
-            let field_name = state
-                .extra()
-                .field_name
-                .clone()
-                .map(Bound::unbind)
-                .or_else(|| self.field_name.clone());
-            let info = ValidationInfo::new(py, state.extra(), &self.config, field_name);
+            let field_name = state.field_name().cloned().map(Bound::unbind);
+            let info = ValidationInfo::new(py, state, &self.config, field_name);
             self.func.call1(py, (input.to_object(py)?, info))
         } else {
             self.func.call1(py, (input.to_object(py)?,))
@@ -162,7 +148,6 @@ pub struct FunctionAfterValidator {
     func: Py<PyAny>,
     config: Py<PyAny>,
     name: String,
-    field_name: Option<Py<PyString>>,
     info_arg: bool,
 }
 
@@ -178,13 +163,8 @@ impl FunctionAfterValidator {
     ) -> ValResult<Py<PyAny>> {
         let v = call(input, state)?;
         let r = if self.info_arg {
-            let field_name = state
-                .extra()
-                .field_name
-                .clone()
-                .map(Bound::unbind)
-                .or_else(|| self.field_name.clone());
-            let info = ValidationInfo::new(py, state.extra(), &self.config, field_name);
+            let field_name = state.field_name().cloned().map(Bound::unbind);
+            let info = ValidationInfo::new(py, state, &self.config, field_name);
             self.func.call1(py, (v, info))
         } else {
             self.func.call1(py, (v,))
@@ -235,7 +215,6 @@ pub struct FunctionPlainValidator {
     func: Py<PyAny>,
     config: Py<PyAny>,
     name: String,
-    field_name: Option<Py<PyString>>,
     info_arg: bool,
 }
 
@@ -256,7 +235,6 @@ impl BuildValidator for FunctionPlainValidator {
                 None => py.None(),
             },
             name: format!("function-plain[{}()]", function_name(function_info.function.bind(py))?),
-            field_name: function_info.field_name.clone(),
             info_arg: function_info.info_arg,
         })
         .into())
@@ -273,13 +251,8 @@ impl Validator for FunctionPlainValidator {
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
         let r = if self.info_arg {
-            let field_name = state
-                .extra()
-                .field_name
-                .clone()
-                .map(Bound::unbind)
-                .or_else(|| self.field_name.clone());
-            let info = ValidationInfo::new(py, state.extra(), &self.config, field_name);
+            let field_name = state.field_name().cloned().map(Bound::unbind);
+            let info = ValidationInfo::new(py, state, &self.config, field_name);
             self.func.call1(py, (input.to_object(py)?, info))
         } else {
             self.func.call1(py, (input.to_object(py)?,))
@@ -298,7 +271,6 @@ pub struct FunctionWrapValidator {
     func: Py<PyAny>,
     config: Py<PyAny>,
     name: String,
-    field_name: Option<Py<PyString>>,
     info_arg: bool,
     hide_input_in_errors: bool,
     validation_error_cause: bool,
@@ -325,7 +297,6 @@ impl BuildValidator for FunctionWrapValidator {
                 None => py.None(),
             },
             name: format!("function-wrap[{}()]", function_name(function_info.function.bind(py))?),
-            field_name: function_info.field_name.clone(),
             info_arg: function_info.info_arg,
             hide_input_in_errors,
             validation_error_cause,
@@ -343,13 +314,8 @@ impl FunctionWrapValidator {
         state: &mut ValidationState<'_, 'py>,
     ) -> ValResult<Py<PyAny>> {
         let r = if self.info_arg {
-            let field_name = state
-                .extra()
-                .field_name
-                .clone()
-                .map(Bound::unbind)
-                .or_else(|| self.field_name.clone());
-            let info = ValidationInfo::new(py, state.extra(), &self.config, field_name);
+            let field_name = state.field_name().cloned().map(Bound::unbind);
+            let info = ValidationInfo::new(py, state, &self.config, field_name);
             self.func.call1(py, (input.to_object(py)?, handler, info))
         } else {
             self.func.call1(py, (input.to_object(py)?, handler))
@@ -508,12 +474,12 @@ macro_rules! py_err_string {
 pub fn convert_err(py: Python<'_>, err: PyErr, input: impl ToErrorValue) -> ValError {
     if err.is_instance_of::<PyValueError>(py) {
         let error_value = err.value(py);
-        if let Ok(pydantic_value_error) = error_value.extract::<PydanticCustomError>() {
-            pydantic_value_error.into_val_error(input)
-        } else if let Ok(pydantic_error_type) = error_value.extract::<PydanticKnownError>() {
-            pydantic_error_type.into_val_error(input)
-        } else if let Ok(validation_error) = err.value(py).extract::<ValidationError>() {
-            validation_error.into_val_error()
+        if let Ok(pydantic_value_error) = error_value.cast::<PydanticCustomError>() {
+            pydantic_value_error.get().clone().into_val_error(input)
+        } else if let Ok(pydantic_error_type) = error_value.cast::<PydanticKnownError>() {
+            pydantic_error_type.get().clone().into_val_error(input)
+        } else if let Ok(validation_error) = err.value(py).cast::<ValidationError>() {
+            validation_error.get().clone().into_val_error()
         } else {
             py_err_string!(py, err, error_value, ValueError, input)
         }
@@ -545,27 +511,29 @@ impl_py_gc_traverse!(ValidationInfo {
 });
 
 impl ValidationInfo {
-    fn new(py: Python, extra: &Extra<'_, '_>, config: &Py<PyAny>, field_name: Option<Py<PyString>>) -> Self {
+    fn new(py: Python, state: &ValidationState<'_, '_>, config: &Py<PyAny>, field_name: Option<Py<PyString>>) -> Self {
+        let extra = state.extra();
         Self {
             config: config.clone_ref(py),
             context: extra.context.map(|ctx| ctx.clone().into()),
             field_name,
-            data: extra.data.as_ref().map(|data| data.clone().into()),
+            data: state.data.as_ref().map(|data| data.clone().into()),
             mode: extra.input_type,
         }
     }
+}
 
+#[pymethods]
+impl ValidationInfo {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.py_gc_traverse(&visit)
     }
 
     fn __clear__(&mut self) {
         self.context = None;
+        self.data = None;
     }
-}
 
-#[pymethods]
-impl ValidationInfo {
     fn __repr__(&self, py: Python) -> PyResult<String> {
         let context = match self.context {
             Some(ref context) => safe_repr(context.bind(py)).to_string(),

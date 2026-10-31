@@ -13,6 +13,8 @@ use serde::ser::SerializeSeq;
 use crate::definitions::DefinitionsBuilder;
 use crate::py_gc::PyGcTraverse;
 use crate::serializers::SerializationState;
+use crate::serializers::extra::IncludeExclude;
+use crate::serializers::filter::SequenceFilter;
 use crate::tools::SchemaDict;
 
 use super::any::AnySerializer;
@@ -63,11 +65,11 @@ impl TypeSerializer for GeneratorSerializer {
                             Ok(len) => Vec::with_capacity(len),
                             Err(_) => Vec::new(),
                         };
+                        let filter = self.filter.for_sequence(state, None);
                         for (index, iter_result) in py_iter.clone().enumerate() {
                             let element = iter_result?;
-                            let op_next = self.filter.index_filter(index, state, None)?;
-                            if let Some((next_include, next_exclude)) = op_next {
-                                let state = &mut state.scoped_include_exclude(next_include, next_exclude);
+                            if let Some(next_include_exclude) = filter.index_filter(index)? {
+                                let state = &mut state.scoped_include_exclude(next_include_exclude);
                                 items.push(item_serializer.to_python(&element, state)?);
                             }
                         }
@@ -107,11 +109,12 @@ impl TypeSerializer for GeneratorSerializer {
                 let mut seq = serializer.serialize_seq(len)?;
                 let item_serializer = self.item_serializer.as_ref();
 
+                let filter = self.filter.for_sequence(state, None);
                 for (index, iter_result) in py_iter.clone().enumerate() {
                     let element = iter_result.map_err(py_err_se_err)?;
-                    let op_next = self.filter.index_filter(index, state, None).map_err(py_err_se_err)?;
-                    if let Some((next_include, next_exclude)) = op_next {
-                        let state = &mut state.scoped_include_exclude(next_include, next_exclude);
+                    let op_next = filter.index_filter(index).map_err(py_err_se_err)?;
+                    if let Some(next_include_exclude) = op_next {
+                        let state = &mut state.scoped_include_exclude(next_include_exclude);
                         let item_serialize = PydanticSerializer::new(&element, item_serializer, state);
                         seq.serialize_element(&item_serialize)?;
                     }
@@ -138,12 +141,20 @@ pub(crate) struct SerializationIterator {
     item_serializer: Arc<CombinedSerializer>,
     extra_owned: ExtraOwned,
     filter: SchemaFilter<usize>,
+    /// The include/exclude values with negative indices resolved, set on the first `__next__()` call.
+    resolved_filters: bool,
+    resolved_include: Option<Py<PyAny>>,
+    resolved_exclude: Option<Py<PyAny>>,
 }
 
+// `item_serializer` is intentionally not traversed: it is an `Arc` clone of a subtree owned (and
+// traversed) by the `SchemaSerializer`. Visiting it here as well would report twice for a single reference,
+// which corrupts the GC's refcount logic.
 impl_py_gc_traverse!(SerializationIterator {
     iterator,
-    item_serializer,
     extra_owned,
+    resolved_include,
+    resolved_exclude
 });
 
 impl SerializationIterator {
@@ -159,9 +170,15 @@ impl SerializationIterator {
             item_serializer: item_serializer.clone(),
             extra_owned: ExtraOwned::new(state),
             filter,
+            resolved_filters: false,
+            resolved_include: None,
+            resolved_exclude: None,
         }
     }
+}
 
+#[pymethods]
+impl SerializationIterator {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.py_gc_traverse(&visit)
     }
@@ -170,11 +187,10 @@ impl SerializationIterator {
         self.extra_owned.model = None;
         self.extra_owned.fallback = None;
         self.extra_owned.context = None;
+        self.resolved_include = None;
+        self.resolved_exclude = None;
     }
-}
 
-#[pymethods]
-impl SerializationIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
@@ -182,13 +198,30 @@ impl SerializationIterator {
     fn __next__(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         let iterator = self.iterator.bind(py);
         let state = &mut self.extra_owned.to_state(py);
+        let filter = if self.resolved_filters {
+            SequenceFilter::from_resolved(
+                &self.filter,
+                IncludeExclude::new(
+                    self.resolved_include.as_ref().map(|v| v.bind(py).clone()),
+                    self.resolved_exclude.as_ref().map(|v| v.bind(py).clone()),
+                ),
+            )
+        } else {
+            self.filter.for_sequence(state, None)
+        };
 
         for iter_result in iterator.clone() {
             let element = iter_result?;
-            let filter = self.filter.index_filter(self.index, state, None)?;
+            let op_next = filter.index_filter(self.index)?;
+            if !self.resolved_filters {
+                let resolved = filter.resolved()?;
+                self.resolved_include = resolved.include.as_ref().map(|v| v.clone().unbind());
+                self.resolved_exclude = resolved.exclude.as_ref().map(|v| v.clone().unbind());
+                self.resolved_filters = true;
+            }
             self.index += 1;
-            if let Some((next_include, next_exclude)) = filter {
-                let state = &mut state.scoped_include_exclude(next_include, next_exclude);
+            if let Some(next_include_exclude) = op_next {
+                let state = &mut state.scoped_include_exclude(next_include_exclude);
                 let v = self.item_serializer.to_python(&element, state)?;
                 state.warnings.final_check(py)?;
                 return Ok(Some(v));

@@ -31,9 +31,6 @@ On Pydantic models, configuration can be specified in two ways:
 
     1. A plain dictionary (i.e. `{'str_max_length': 5}`) can also be used.
 
-    !!! note
-        In Pydantic V1, the `Config` class was used. This is still supported, but **deprecated**.
-
 * Using class arguments:
 
     ```python
@@ -46,7 +43,7 @@ On Pydantic models, configuration can be specified in two ways:
 
   Unlike the [`model_config`][pydantic.BaseModel.model_config] class attribute,
   static type checkers will recognize class arguments. For `frozen`, any instance
-  mutation will be flagged as an type checking error.
+  mutation will be flagged as a type checking error.
 
 ## Configuration on Pydantic dataclasses
 
@@ -183,6 +180,26 @@ print(Model.model_config)
     [MRO]. For more details, see [this issue](https://github.com/pydantic/pydantic/issues/9992).
 
     [MRO]: https://docs.python.org/3/glossary.html#term-method-resolution-order
+
+## Plugin settings
+
+The [`plugin_settings`][pydantic.ConfigDict.plugin_settings] configuration value passes options to
+Pydantic plugins (code that hooks into validation, usually for tooling that observes it rather than for
+changing validation behaviour). Its value is a dictionary keyed by plugin name, so a given plugin reads
+only its own entry.
+
+The main plugin in use today is [Logfire](../integrations/logfire.md)'s, which records validations for
+observability. You can tune what it records per model, for instance recording only failures for one
+particular model:
+
+```python
+from pydantic import BaseModel
+
+
+class User(BaseModel, plugin_settings={'logfire': {'record': 'failure'}}):
+    name: str
+    email: str
+```
 
 ## Configuration propagation
 

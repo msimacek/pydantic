@@ -10,7 +10,7 @@ import pytest
 import typing_extensions
 from annotated_types import Lt
 from pydantic_core import core_schema
-from typing_extensions import NotRequired, ReadOnly, Required, TypedDict
+from typing_extensions import Never, NotRequired, ReadOnly, Required, TypedDict
 
 from pydantic import (
     BaseModel,
@@ -448,9 +448,9 @@ def test_typed_dict_inheritance_schema(TypedDict, req_no_req):
 
 def test_typeddict_annotated_nonoptional_schema(TypedDict):
     class DataTD(TypedDict):
-        a: Optional[int]
-        b: Annotated[Optional[int], Field(42)]
-        c: Annotated[Optional[int], Field(description='Test')]
+        a: int | None
+        b: Annotated[int | None, Field(42)]
+        c: Annotated[int | None, Field(description='Test')]
 
     class Model(BaseModel):
         data_td: DataTD
@@ -489,9 +489,9 @@ def test_typeddict_annotated_nonoptional_schema(TypedDict):
 )
 def test_typeddict_annotated(TypedDict, input_value, expected):
     class DataTD(TypedDict):
-        a: Optional[int]
-        b: Annotated[Optional[int], Field(42)]
-        c: Annotated[Optional[int], Field(description='Test', lt=4)]
+        a: int | None
+        b: Annotated[int | None, Field(42)]
+        c: Annotated[int | None, Field(description='Test', lt=4)]
 
     class Model(BaseModel):
         d: DataTD
@@ -1053,6 +1053,109 @@ def test_typeddict_extraitems_generic() -> None:
     assert exc.value.errors()[0]['loc'] == ('extra',)
 
 
+def test_typeddict_closed_inherited() -> None:
+    """https://github.com/pydantic/pydantic/issues/13919"""
+
+    class Parent(TypedDict, closed=True):
+        f: int
+
+    class Child(Parent):
+        pass
+
+    ta = TypeAdapter(Child)
+
+    with pytest.raises(ValidationError) as exc:
+        ta.validate_python({'f': 1, 'extra': 1})
+
+    assert exc.value.errors()[0]['type'] == 'extra_forbidden'
+    assert ta.json_schema()['additionalProperties'] is False
+
+
+def test_typeddict_extraitems_inherited() -> None:
+    """https://github.com/pydantic/pydantic/issues/13919"""
+
+    class Parent(TypedDict, extra_items=int):
+        f: int
+
+    class Child(Parent):
+        g: NotRequired[int]
+
+    class GrandChild(Child):
+        pass
+
+    ta = TypeAdapter(GrandChild)
+
+    assert ta.validate_python({'f': 1, 'g': 1, 'extra': '1'}) == {'f': 1, 'g': 1, 'extra': 1}
+    assert ta.json_schema()['additionalProperties'] == {'type': 'integer'}
+
+
+def test_typeddict_extraitems_overridden() -> None:
+    class Parent(TypedDict, extra_items=ReadOnly[float]):
+        f: int
+
+    class Child(Parent, extra_items=int):
+        pass
+
+    assert TypeAdapter(Child).json_schema()['additionalProperties'] == {'type': 'integer'}
+
+
+def test_typeddict_extra_field_override_ignored(py_and_json) -> None:
+    @with_config(ConfigDict(extra='allow'))
+    class TD(TypedDict):
+        a: Annotated[int, Field(alias='b')]
+
+    @with_config(ConfigDict(extra='allow'))
+    class NotRequiredTD(TypedDict):
+        a: NotRequired[Annotated[int, Field(alias='b')]]
+
+    class ExtraItemsTD(TypedDict, extra_items=str):
+        a: Annotated[int, Field(alias='b')]
+
+    assert py_and_json(TD).validate_test({'b': 1, 'a': 'not_an_int', 'c': 2}) == {'a': 1, 'c': 2}
+    assert py_and_json(NotRequiredTD).validate_test({'a': 'not_an_int'}) == {}
+    assert py_and_json(ExtraItemsTD).validate_test({'b': 1, 'a': 'not_an_int', 'c': 'd'}) == {'a': 1, 'c': 'd'}
+
+
+def test_typeddict_runtime_extra_allow_cannot_override_field() -> None:
+    class TD(TypedDict):
+        a: Annotated[int, Field(alias='b')]
+
+    ta = TypeAdapter(TD)
+    assert ta.validate_python({'b': 1, 'a': 'not_an_int', 'c': 2}, extra='allow') == {'a': 1, 'c': 2}
+    assert ta.validate_json('{"b": 1, "a": "not_an_int", "c": 2}', extra='allow') == {'a': 1, 'c': 2}
+
+
+def test_typeddict_extraitems_never() -> None:
+    class TD(TypedDict, extra_items=Never):
+        f: int
+
+    ta = TypeAdapter(TD)
+
+    with pytest.raises(ValidationError) as exc:
+        ta.validate_python({'f': 1, 'extra': 1})
+
+    assert exc.value.errors()[0]['type'] == 'extra_forbidden'
+    assert ta.json_schema()['additionalProperties'] is False
+
+
+def test_typeddict_extraitems_readonly() -> None:
+    class TD(TypedDict, extra_items=ReadOnly[int]):
+        f: int
+
+    with pytest.warns(UserWarning, match="Extra items on TypedDict class 'TD' are using the `ReadOnly` qualifier"):
+        ta = TypeAdapter(TD)
+
+    assert ta.validate_python({'f': 1, 'extra': '1'}) == {'f': 1, 'extra': 1}
+
+
+def test_typeddict_extraitems_readonly_never() -> None:
+    class TD(TypedDict, extra_items=ReadOnly[Never]):
+        f: int
+
+    # No `ReadOnly` warning, as no extra items are allowed:
+    assert TypeAdapter(TD).json_schema()['additionalProperties'] is False
+
+
 def test_typeddict_incompatible_extra_config_warning() -> None:
     @with_config(extra='allow')
     class TD1(TypedDict, closed=True):
@@ -1089,3 +1192,52 @@ def test_typeddict_core_schema_no_cls_extra_config() -> None:
     )
 
     assert GenerateJsonSchema().generate(cs_allow) == {'additionalProperties': True, 'properties': {}, 'type': 'object'}
+
+
+def test_typeddict_core_schema_no_cls_extra_config_with_extas_schema() -> None:
+    cs_allow_extras_schema = core_schema.typed_dict_schema(
+        fields={},
+        cls=None,
+        extras_schema=core_schema.int_schema(),
+        config={'extra_fields_behavior': 'allow'},
+    )
+
+    assert GenerateJsonSchema().generate(cs_allow_extras_schema) == {
+        'additionalProperties': {'type': 'integer'},
+        'properties': {},
+        'type': 'object',
+    }
+
+
+def test_typeddict_validate_json_duplicate_keys() -> None:
+    class Data(TypedDict):
+        field_a: str
+        field_b: int
+
+    ta = TypeAdapter(Data)
+
+    # language=json
+    input_str = '{"field_a": "abc", "field_b": 1}'
+    assert ta.validate_json(input_str) == {'field_a': 'abc', 'field_b': 1}
+    # the last value wins, like with Python:
+    # language=json
+    input_str = '{"field_a": "a", "field_a": "b", "field_b": 1}'
+    assert ta.validate_json(input_str) == {'field_a': 'b', 'field_b': 1}
+
+
+def test_typeddict_validate_json_error_loc() -> None:
+    class Data(TypedDict):
+        field_a: list[int]
+
+    ta = TypeAdapter(Data)
+
+    with pytest.raises(ValidationError) as exc_info:
+        ta.validate_json('{"field_a": [1, 2, "wrong"]}')
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'int_parsing',
+            'loc': ('field_a', 2),
+            'msg': 'Input should be a valid integer, unable to parse string as an integer',
+            'input': 'wrong',
+        }
+    ]

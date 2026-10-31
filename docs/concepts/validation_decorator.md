@@ -185,6 +185,9 @@ using all possible [parameter configurations][parameter] and all possible combin
 
     For reference, see the [related specification section] and [PEP 692].
 
+    /// version-added | v2.10
+    ///
+
     [related specification section]: https://typing.readthedocs.io/en/latest/spec/callables.html#unpack-for-keyword-arguments
     [PEP 692]: https://peps.python.org/pep-0692/
 
@@ -399,6 +402,10 @@ print(foo())
 Currently upon validation failure, a standard Pydantic [`ValidationError`][pydantic_core.ValidationError] is raised
 (see [model error handling](models.md#error-handling) for details). This is also true for missing required arguments,
 where Python normally raises a [`TypeError`][].
+
+The error identifies the argument and value that were rejected. If you also need those details in the
+surrounding trace context, [Logfire](../errors/troubleshooting.md) can record them when a decorated
+call fails.
 
 ### Performance
 

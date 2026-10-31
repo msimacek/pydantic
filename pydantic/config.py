@@ -2,19 +2,16 @@
 
 from __future__ import annotations as _annotations
 
-import warnings
+from collections.abc import Callable
 from re import Pattern
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, Union, cast, overload
 
-from typing_extensions import TypeAlias, TypedDict, Unpack, deprecated
+from typing_extensions import TypedDict, Unpack
 
-from ._migration import getattr_migration
 from .aliases import AliasGenerator
 from .errors import PydanticUserError
-from .warnings import PydanticDeprecatedSince211
 
 if TYPE_CHECKING:
-    from ._internal._generate_schema import GenerateSchema as _GenerateSchema
     from .fields import ComputedFieldInfo, FieldInfo
 
 __all__ = ('ConfigDict', 'with_config')
@@ -25,10 +22,7 @@ JsonDict: TypeAlias = dict[str, JsonValue]
 
 JsonEncoder = Callable[[Any], Any]
 
-JsonSchemaExtraCallable: TypeAlias = Union[
-    Callable[[JsonDict], None],
-    Callable[[JsonDict, type[Any]], None],
-]
+JsonSchemaExtraCallable: TypeAlias = Callable[[JsonDict], None] | Callable[[JsonDict, type[Any]], None]
 
 ExtraValues = Literal['allow', 'ignore', 'forbid']
 
@@ -55,7 +49,7 @@ class ConfigDict(TypedDict, total=False):
     """Whether to strip leading and trailing whitespace for str types."""
 
     str_min_length: int
-    """The minimum length for str types. Defaults to `None`."""
+    """The minimum length for str types. Defaults to `0`."""
 
     str_max_length: int | None
     """The maximum length for str types. Defaults to `None`."""
@@ -181,9 +175,6 @@ class ConfigDict(TypedDict, total=False):
     Whether models are faux-immutable, i.e. whether `__setattr__` is allowed, and also generates
     a `__hash__()` method for the model. This makes instances of the model potentially hashable if all the
     attributes are hashable. Defaults to `False`.
-
-    Note:
-        On V1, the inverse of this setting was called `allow_mutation`, and was `True` by default.
     """
 
     populate_by_name: bool
@@ -227,17 +218,16 @@ class ConfigDict(TypedDict, total=False):
 
     use_enum_values: bool
     """
-    Whether to populate models with the `value` property of enums, rather than the raw enum.
-    This may be useful if you want to serialize `model.model_dump()` later. Defaults to `False`.
+    Whether to populate models with the [`value`][enum.Enum.value] property of enums, rather than the raw enum.
+    This may be useful if you want to serialize the value later. Defaults to `False`.
 
     !!! note
-        If you have an `Optional[Enum]` value that you set a default for, you need to use `validate_default=True`
-        for said Field to ensure that the `use_enum_values` flag takes effect on the default, as extracting an
+        If you have a field typed as an enum with a default value, the [`validate_default`][pydantic.ConfigDict.validate_default]
+        configuration needs to be set to ensure that the `use_enum_values` flag takes effect on the default, as extracting an
         enum's value occurs during validation, not serialization.
 
     ```python
     from enum import Enum
-    from typing import Optional
 
     from pydantic import BaseModel, ConfigDict, Field
 
@@ -250,7 +240,7 @@ class ConfigDict(TypedDict, total=False):
         model_config = ConfigDict(use_enum_values=True)
 
         some_enum: SomeEnum
-        another_enum: Optional[SomeEnum] = Field(
+        another_enum: SomeEnum | None = Field(
             default=SomeEnum.FOO, validate_default=True
         )
 
@@ -456,8 +446,8 @@ class ConfigDict(TypedDict, total=False):
     A `dict` of custom JSON encoders for specific types. Defaults to `None`.
 
     /// version-deprecated | v2
-    This configuration option is a carryover from v1. We originally planned to remove it in v2 but didn't have a 1:1 replacement
-    so we are keeping it for now. It is still deprecated and will likely be removed in the future.
+    This configuration option is deprecated. Use [custom serializers](../concepts/serialization.md#custom-serializers)
+    instead.
     ///
     """
 
@@ -598,6 +588,7 @@ class ConfigDict(TypedDict, total=False):
     /// version-added | v2.12
     This setting replaces [`ser_json_timedelta`][pydantic.config.ConfigDict.ser_json_timedelta],
     which will be deprecated in v3. `ser_json_temporal` adds more configurability for the other temporal types.
+    It takes precedence over `ser_json_timedelta`.
     ///
     """
 
@@ -632,6 +623,9 @@ class ConfigDict(TypedDict, total=False):
 
     val_json_bytes: Literal['utf8', 'base64', 'hex']
     """
+    /// version-added | v2.9
+    ///
+
     The encoding of JSON serialized bytes to decode. Defaults to `'utf8'`.
     Set equal to `ser_json_bytes` to get back an equal value after serialization round trip.
 
@@ -809,15 +803,6 @@ class ConfigDict(TypedDict, total=False):
 
     plugin_settings: dict[str, object] | None
     """A `dict` of settings for plugins. Defaults to `None`."""
-
-    schema_generator: type[_GenerateSchema] | None
-    """
-    The `GenerateSchema` class to use during core schema generation.
-
-    /// version-deprecated | v2.10
-    The `GenerateSchema` class is private and highly subject to change.
-    ///
-    """
 
     json_schema_serialization_defaults_required: bool
     """
@@ -1195,22 +1180,22 @@ class ConfigDict(TypedDict, total=False):
 
         url: AnyUrl
 
-    m = Model(url='http://example.com')
+    m = Model(url='https://example.com')
     print(m.url)
-    #> http://example.com
+    #> https://example.com
     ```
 
     /// version-added | v2.12
     ///
     """
 
+    polymorphic_serialization: bool
+    """
+    Whether to use polymorphic serialization for subclasses of the model or Pydantic dataclass. Defaults to `False`.
+    """
+
 
 _TypeT = TypeVar('_TypeT', bound=type)
-
-
-@overload
-@deprecated('Passing `config` as a keyword argument is deprecated. Pass `config` as a positional argument instead.')
-def with_config(*, config: ConfigDict) -> Callable[[_TypeT], _TypeT]: ...
 
 
 @overload
@@ -1247,10 +1232,6 @@ def with_config(config: ConfigDict | None = None, /, **kwargs: Any) -> Callable[
         #> {'x': 'abc'}
         ```
 
-    /// deprecated-removed | v2.11 v3
-    Passing `config` as a keyword argument.
-    ///
-
     /// version-changed | v2.11
     Keyword arguments can be provided directly instead of a config dictionary.
     ///
@@ -1258,15 +1239,7 @@ def with_config(config: ConfigDict | None = None, /, **kwargs: Any) -> Callable[
     if config is not None and kwargs:
         raise ValueError('Cannot specify both `config` and keyword arguments')
 
-    if len(kwargs) == 1 and (kwargs_conf := kwargs.get('config')) is not None:
-        warnings.warn(
-            'Passing `config` as a keyword argument is deprecated. Pass `config` as a positional argument instead',
-            category=PydanticDeprecatedSince211,
-            stacklevel=2,
-        )
-        final_config = cast(ConfigDict, kwargs_conf)
-    else:
-        final_config = config if config is not None else cast(ConfigDict, kwargs)
+    final_config = config if config is not None else cast(ConfigDict, kwargs)
 
     def inner(class_: _TypeT, /) -> _TypeT:
         # Ideally, we would check for `class_` to either be a `TypedDict` or a stdlib dataclass.
@@ -1283,6 +1256,3 @@ def with_config(config: ConfigDict | None = None, /, **kwargs: Any) -> Callable[
         return class_
 
     return inner
-
-
-__getattr__ = getattr_migration(__name__)

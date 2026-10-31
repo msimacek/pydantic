@@ -19,9 +19,11 @@ mod build_tools;
 mod common;
 mod definitions;
 mod errors;
+mod fields_set;
 mod input;
 mod lookup_key;
 mod recursion_guard;
+mod schema_gather;
 mod serializers;
 mod tools;
 mod url;
@@ -35,6 +37,7 @@ pub use build_tools::SchemaError;
 pub use errors::{
     PydanticCustomError, PydanticKnownError, PydanticOmit, PydanticUseDefault, ValidationError, list_all_errors,
 };
+pub use fields_set::ModelFieldsSet;
 pub use serializers::{
     PydanticSerializationError, PydanticSerializationUnexpectedValue, SchemaSerializer, WarningsArg, to_json,
     to_jsonable_python,
@@ -113,11 +116,17 @@ pub mod _pydantic_core {
 
     #[pymodule_export]
     use crate::{
-        ArgsKwargs, PyMultiHostUrl, PySome, PyUrl, PydanticCustomError, PydanticKnownError, PydanticOmit,
-        PydanticSerializationError, PydanticSerializationUnexpectedValue, PydanticUndefinedType, PydanticUseDefault,
-        SchemaError, SchemaSerializer, SchemaValidator, TzInfo, ValidationError, from_json, list_all_errors, to_json,
-        to_jsonable_python,
+        ArgsKwargs, ModelFieldsSet, PyMultiHostUrl, PySome, PyUrl, PydanticCustomError, PydanticKnownError,
+        PydanticOmit, PydanticSerializationError, PydanticSerializationUnexpectedValue, PydanticUndefinedType,
+        PydanticUseDefault, SchemaError, SchemaSerializer, SchemaValidator, TzInfo, ValidationError, from_json,
+        list_all_errors, to_json, to_jsonable_python,
     };
+
+    #[pymodule]
+    mod _schema_gather {
+        #[pymodule_export]
+        use crate::schema_gather::{MissingDefinitionError, gather_schemas_for_cleaning};
+    }
 
     #[pymodule_init]
     fn module_init(m: &Bound<'_, PyModule>) -> PyResult<()> {

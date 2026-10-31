@@ -195,8 +195,8 @@ the `source` will be the actual class where `__get_pydantic_core_schema__` is de
 ## Model validation and serialization
 
 While model definition was scoped to the *class* level (i.e. when defining your model), model validation
-and serialization happens at the *instance* level. Both these concepts are handled in `pydantic-core`
-(providing a 5 to 20 performance increase compared to Pydantic V1), by using the previously built core schema.
+and serialization happens at the *instance* level. Both these concepts are handled in `pydantic-core`,
+by using the previously built core schema.
 
 `pydantic-core` exposes a [`SchemaValidator`][pydantic_core.SchemaValidator] and
 [`SchemaSerializer`][pydantic_core.SchemaSerializer] class to perform these tasks:
@@ -221,3 +221,12 @@ dumped = model.model_dump()  # (2)!
    [`SchemaSerializer.to_python`][pydantic_core.SchemaSerializer.to_python] method.
    `pydantic-core` will read the instance's `__dict__` attribute and built the appropriate result
    (again, following the core schema of the model).
+
+### The plugin hook around validation
+
+Pydantic wraps the `SchemaValidator` in a plugin layer: when plugins are installed, each of the
+`validate_python`, `validate_json`, and `validate_strings` calls can be intercepted, letting a plugin
+observe the input, result, and any error for every validation. This is the mechanism behind
+observability tooling such as [Logfire](../integrations/logfire.md), which uses it to record validations
+without any per-call instrumentation. Plugins are configured per model through the
+[`plugin_settings`][pydantic.ConfigDict.plugin_settings] configuration value.

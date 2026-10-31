@@ -56,9 +56,27 @@ with one noticeable enhancement being that `jiter` supports deserialization of `
 In the future, `jiter` is intended to enable support validation errors to include the location
 in the original JSON input which contained the invalid value.
 
+If a key is duplicated in a JSON object, the last value is used (similarly to [`json.loads()`][json.loads]):
+
+```python
+from pydantic import BaseModel
+
+
+class Model(BaseModel):
+    x: int
+
+
+print(Model.model_validate_json('{"x": 1, "x": 2}'))
+#> x=2
+```
+
 ### Partial JSON Parsing
 
-**Starting in v2.7.0**, Pydantic's [JSON parser](https://docs.rs/jiter/latest/jiter/) offers support for partial JSON parsing, which is exposed via [`pydantic_core.from_json`][pydantic_core.from_json]. Here's an example of this feature in action:
+/// version-added | v2.7
+///
+
+Pydantic's [JSON parser](https://docs.rs/jiter/latest/jiter/) offers support for partial JSON parsing, which is exposed via [`pydantic_core.from_json()`][pydantic_core.from_json].
+Here's an example of this feature in action:
 
 ```python
 from pydantic_core import from_json
@@ -92,8 +110,10 @@ print(dog_dict)
 ```
 
 !!! tip "Validating LLM Output"
-    This feature is particularly beneficial for validating LLM outputs.
-    We've written some blog posts about this topic, which you can find on [our website](https://pydantic.dev/articles).
+    This feature is particularly beneficial for validating LLM outputs. However, even carefully prompted
+    models produce output that fails validation some fraction of the time. If you're validating LLM output in production,
+    [Logfire](../integrations/logfire.md) can record just the failures, so you can see which generations
+    didn't match your schema, and why.
 
 In future versions of Pydantic, we expect to expand support for this feature through either Pydantic's other JSON validation functions
 ([`pydantic.main.BaseModel.model_validate_json`][pydantic.main.BaseModel.model_validate_json] and
@@ -127,7 +147,7 @@ Check out the following example for a more in-depth look at how to use default v
 !!! example "Using default values with partial JSON parsing"
 
     ```python
-    from typing import Annotated, Any, Optional
+    from typing import Annotated, Any
 
     import pydantic_core
 
@@ -158,13 +178,13 @@ Check out the following example for a more in-depth look at how to use default v
 
 
     class MyModel(BaseModel):
-        foo: Optional[str] = None
-        bar: Annotated[
-            Optional[tuple[str, int]], WrapValidator(default_on_error)
-        ] = None
-        nested: Annotated[
-            Optional[NestedModel], WrapValidator(default_on_error)
-        ] = None
+        foo: str | None = None
+        bar: Annotated[tuple[str, int] | None, WrapValidator(default_on_error)] = (
+            None
+        )
+        nested: Annotated[NestedModel | None, WrapValidator(default_on_error)] = (
+            None
+        )
 
 
     m = MyModel.model_validate(

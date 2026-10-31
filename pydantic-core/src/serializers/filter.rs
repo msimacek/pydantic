@@ -1,5 +1,6 @@
 use ahash::AHashSet;
 use pyo3::exceptions::PyValueError;
+use std::cell::OnceCell;
 use std::hash::Hash;
 
 use pyo3::exceptions::PyTypeError;
@@ -8,12 +9,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PySet};
 
 use crate::serializers::SerializationState;
+use crate::serializers::extra::IncludeExclude;
 use crate::tools::SchemaDict;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SchemaFilter<T> {
-    include: Option<AHashSet<T>>,
-    exclude: Option<AHashSet<T>>,
+    include: Option<Box<AHashSet<T>>>,
+    exclude: Option<Box<AHashSet<T>>>,
 }
 
 fn map_negative_index<'py>(value: &Bound<'py, PyAny>, len: Option<usize>) -> PyResult<Bound<'py, PyAny>> {
@@ -58,7 +60,65 @@ fn map_negative_indices<'py>(
     }
 }
 
-type NextFilters<'py> = Option<(Option<Bound<'py, PyAny>>, Option<Bound<'py, PyAny>>)>;
+type NextFilters<'py> = Option<IncludeExclude<'py>>;
+
+/// The include/exclude filters for the items of one sequence.
+pub(crate) struct SequenceFilter<'a, 'py, F> {
+    filter: &'a F,
+    include: Option<Bound<'py, PyAny>>,
+    exclude: Option<Bound<'py, PyAny>>,
+    len: Option<usize>,
+    resolved: OnceCell<IncludeExclude<'py>>,
+}
+
+impl<'a, 'py, F: FilterLogic<usize>> SequenceFilter<'a, 'py, F> {
+    fn new(filter: &'a F, state: &SerializationState<'py>, len: Option<usize>) -> Self {
+        Self {
+            filter,
+            include: state.include().cloned(),
+            exclude: state.exclude().cloned(),
+            len,
+            resolved: OnceCell::new(),
+        }
+    }
+
+    /// Rebuild a filter from the values returned by [`SequenceFilter::resolved`] on a filter built
+    /// earlier, for serializers that can't keep the filter across items (e.g. a lazy iterator that
+    /// serializes one item per `__next__()` call).
+    pub fn from_resolved(filter: &'a F, resolved: IncludeExclude<'py>) -> Self {
+        Self {
+            filter,
+            include: None,
+            exclude: None,
+            len: None,
+            resolved: OnceCell::from(resolved),
+        }
+    }
+
+    /// The include/exclude values with negative indices resolved against the sequence length.
+    pub fn resolved(&self) -> PyResult<&IncludeExclude<'py>> {
+        if let Some(resolved) = self.resolved.get() {
+            return Ok(resolved);
+        }
+        let resolved = IncludeExclude::new(
+            self.include
+                .as_ref()
+                .map(|v| map_negative_indices(v, self.len))
+                .transpose()?,
+            self.exclude
+                .as_ref()
+                .map(|v| map_negative_indices(v, self.len))
+                .transpose()?,
+        );
+        Ok(self.resolved.get_or_init(|| resolved))
+    }
+
+    pub fn index_filter(&self, index: usize) -> PyResult<NextFilters<'py>> {
+        let resolved = self.resolved()?;
+        self.filter
+            .filter(index, index, resolved.include.as_ref(), resolved.exclude.as_ref())
+    }
+}
 
 impl SchemaFilter<usize> {
     pub fn from_schema(schema: &Bound<'_, PyDict>) -> PyResult<Self> {
@@ -73,7 +133,7 @@ impl SchemaFilter<usize> {
         }
     }
 
-    fn build_set_ints(v: Option<Bound<'_, PyAny>>) -> PyResult<Option<AHashSet<usize>>> {
+    fn build_set_ints(v: Option<Bound<'_, PyAny>>) -> PyResult<Option<Box<AHashSet<usize>>>> {
         match v {
             Some(value) => {
                 if value.is_none() {
@@ -85,22 +145,20 @@ impl SchemaFilter<usize> {
                     for item in py_set {
                         set.insert(item.extract()?);
                     }
-                    Ok(Some(set))
+                    Ok(Some(Box::new(set)))
                 }
             }
             None => Ok(None),
         }
     }
 
-    pub fn index_filter<'py>(
+    /// Build the filter for the items of a sequence of length `len` (`None` if the length is unknown).
+    pub fn for_sequence<'py>(
         &self,
-        index: usize,
         state: &SerializationState<'py>,
         len: Option<usize>,
-    ) -> PyResult<NextFilters<'py>> {
-        let include = state.include().map(|v| map_negative_indices(v, len)).transpose()?;
-        let exclude = state.exclude().map(|v| map_negative_indices(v, len)).transpose()?;
-        self.filter(index, index, include.as_ref(), exclude.as_ref())
+    ) -> SequenceFilter<'_, 'py, Self> {
+        SequenceFilter::new(self, state, len)
     }
 }
 
@@ -111,7 +169,7 @@ impl SchemaFilter<isize> {
         Ok(Self { include, exclude })
     }
 
-    fn build_set_hashes(v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<AHashSet<isize>>> {
+    fn build_set_hashes(v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Box<AHashSet<isize>>>> {
         match v {
             Some(value) => {
                 if value.is_none() {
@@ -123,7 +181,7 @@ impl SchemaFilter<isize> {
                     for item in py_set.iter() {
                         set.insert(item.hash()?);
                     }
-                    Ok(Some(set))
+                    Ok(Some(Box::new(set)))
                 }
             }
             None => Ok(None),
@@ -140,7 +198,7 @@ impl SchemaFilter<isize> {
     }
 }
 
-trait FilterLogic<T: Eq + Copy> {
+pub(crate) trait FilterLogic<T: Eq + Copy> {
     /// whether an `index`/`key` is explicitly included, this is combined with call-time `include` below
     fn explicit_include(&self, value: T) -> bool;
     /// default decision on whether to include the item at a given `index`/`key`
@@ -194,9 +252,9 @@ trait FilterLogic<T: Eq + Copy> {
                 if let Some(inc_value) = op_inc_value {
                     // if the index is in include, we definitely want to include this index
                     return if is_ellipsis_like(&inc_value) {
-                        Ok(Some((None, next_exclude)))
+                        Ok(Some(IncludeExclude::new(None, next_exclude)))
                     } else {
-                        Ok(Some((Some(inc_value), next_exclude)))
+                        Ok(Some(IncludeExclude::new(Some(inc_value), next_exclude)))
                     };
                 } else if !self.explicit_include(int_key) {
                     // if the index is not in include, include exists, AND it's not in schema include,
@@ -205,7 +263,7 @@ trait FilterLogic<T: Eq + Copy> {
                 }
             } else if let Ok(include_set) = include.cast::<PySet>() {
                 if include_set.contains(py_key)? || include_set.contains(intern!(include_set.py(), "__all__"))? {
-                    return Ok(Some((None, next_exclude)));
+                    return Ok(Some(IncludeExclude::new(None, next_exclude)));
                 } else if !self.explicit_include(int_key) {
                     // if the index is not in include, include exists, AND it's not in schema include,
                     // this index should be omitted
@@ -213,7 +271,7 @@ trait FilterLogic<T: Eq + Copy> {
                 }
             } else if let Some(contains) = check_contains(include, py_key)? {
                 if contains {
-                    return Ok(Some((None, next_exclude)));
+                    return Ok(Some(IncludeExclude::new(None, next_exclude)));
                 } else if !self.explicit_include(int_key) {
                     // if the index is not in include, include exists, AND it's not in schema include,
                     // this index should be omitted
@@ -225,9 +283,9 @@ trait FilterLogic<T: Eq + Copy> {
         }
 
         if next_exclude.is_some() {
-            Ok(Some((None, next_exclude)))
+            Ok(Some(IncludeExclude::new(None, next_exclude)))
         } else if self.default_filter(int_key) {
-            Ok(Some((None, None)))
+            Ok(Some(IncludeExclude::empty()))
         } else {
             Ok(None)
         }
@@ -272,15 +330,13 @@ impl AnyFilter {
         self.filter(key, 0, state.include(), state.exclude())
     }
 
-    pub fn index_filter<'py>(
+    /// Build the filter for the items of a sequence of length `len` (`None` if the length is unknown).
+    pub fn for_sequence<'py>(
         &self,
-        index: usize,
         state: &SerializationState<'py>,
         len: Option<usize>,
-    ) -> PyResult<NextFilters<'py>> {
-        let include = state.include().map(|v| map_negative_indices(v, len)).transpose()?;
-        let exclude = state.exclude().map(|v| map_negative_indices(v, len)).transpose()?;
-        self.filter(index, index, include.as_ref(), exclude.as_ref())
+    ) -> SequenceFilter<'_, 'py, Self> {
+        SequenceFilter::new(self, state, len)
     }
 }
 
